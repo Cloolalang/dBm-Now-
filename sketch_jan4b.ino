@@ -1,10 +1,10 @@
 /* * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v4.21 (Bitrate Selectable)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v2.5 (Bitrate Selectable)
  * ======================================================================================
  * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps
  */
 
-#define FW_VERSION "4.21"
+#define FW_VERSION "2.5"
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -53,9 +53,14 @@ uint32_t rangeMinCounter = 0, interfMinCounter = 0;
 unsigned long minuteTimer = 0;
 String linkCondition = "STABLE";
 
+// RF channel 1–14. Both devices boot on 1 for quick sync. Master sets via Serial; transponder follows from payload.
+uint8_t wifiChannel = 1;
+
 // Transponder Specific
 unsigned long lastPacketTime = 0;
-uint32_t transponderTimeout = 5000; 
+uint32_t transponderTimeout = 5000;
+#define TRANSPONDER_CYCLE_AFTER_TIMEOUTS 3   // require this many consecutive timeouts before hunting (avoids cycling on brief fades)
+uint32_t transponderConsecutiveTimeouts = 0; 
 
 enum LEDState { IDLE, TX_FLASH, GAP, RX_FLASH };
 LEDState currentLEDState = IDLE;
@@ -67,6 +72,7 @@ typedef struct {
     float targetPower;
     uint32_t pingInterval; 
     uint8_t hour; uint8_t minute; uint8_t second;
+    uint8_t channel;  // RF channel 1–14
 } Payload;
 Payload myData, txData, rxData;
 
@@ -93,18 +99,24 @@ void applyRFSettings(uint8_t mode) {
         if (!plotMode) Serial.printf(">> Protocol: LONG RANGE (%s)\n", (mode == MODE_LR_500K) ? "500kbps" : "250kbps");
     }
 
+    esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
+
     esp_now_init();
     esp_now_register_recv_cb(onDataRecv);
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-    peerInfo.channel = 0;
+    peerInfo.channel = wifiChannel;
     peerInfo.encrypt = false;
     esp_now_add_peer(&peerInfo);
 }
 
-// Transponder uses this to "hunt" for the master's current setting
+// Transponder uses this to "hunt" for the master's channel and RF mode when no packet received
+static uint32_t transponderTimeoutCount = 0;
 void cycleTransponderProtocol() {
-    currentRFMode = (currentRFMode + 1) % 3; 
+    transponderTimeoutCount++;
+    wifiChannel = (wifiChannel % 14) + 1;  // cycle 1..14 so transponder can find master after channel change
+    if (transponderTimeoutCount % 14 == 0)
+        currentRFMode = (currentRFMode + 1) % 3;  // cycle RF mode after trying all channels
     applyRFSettings(currentRFMode);
 }
 
@@ -215,6 +227,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             }
         }
     } else {
+        transponderConsecutiveTimeouts = 0;   // any received packet resets "lost" count
         memcpy(&rxData, incoming, sizeof(rxData));
         float rssi = (float)info->rx_ctrl->rssi;
         float pathLoss = rxData.txPower - rssi;
@@ -232,18 +245,23 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             }
         }
         setESP32Time(rxData.hour, rxData.minute);
+        if (rxData.channel >= 1 && rxData.channel <= 14 && rxData.channel != wifiChannel) {
+            wifiChannel = rxData.channel;
+            esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
+        }
         uint32_t newTimeout = (rxData.pingInterval * 3 > 5000) ? (rxData.pingInterval * 3) : 5000;
         transponderTimeout = newTimeout;
         if (!esp_now_is_peer_exist(info->src_addr)) {
             esp_now_peer_info_t peerInfo = {};
             memcpy(peerInfo.peer_addr, info->src_addr, 6);
-            peerInfo.channel = 0;
+            peerInfo.channel = wifiChannel;
             peerInfo.encrypt = false;
             esp_now_add_peer(&peerInfo);
         }
         setPower(rxData.targetPower);
         txData.nonce = rxData.nonce;
         txData.txPower = currentPower;
+        txData.channel = wifiChannel;
         txData.measuredRSSI = (float)info->rx_ctrl->rssi; 
         esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
         digitalWrite(ledPin, HIGH); ledTimer = millis() + 40;
@@ -260,6 +278,7 @@ void printDetailedStatus() {
     Serial.printf("   ESP32 RF PROBE | v%s | ROLE: %s\n", FW_VERSION, deviceRole.c_str());
     Serial.println("==================================================");
     Serial.printf("  RF PROTOCOL : %s\n", modeStr.c_str());
+    Serial.printf("  RF CHANNEL  : %u (1-14)\n", wifiChannel);
 
     if (isMaster) {
         Serial.printf("  LINK STATUS : %s\n", linkCondition.c_str());
@@ -283,8 +302,10 @@ void printDetailedStatus() {
         Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
         Serial.println("  [e] Erase CSV     : Delete log file for fresh start");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
+        Serial.println("  [n] Set channel   : RF channel 1-14, e.g. n6 (transponder follows)");
     } else {
         Serial.printf("  TX PWR    : %.1f dBm (transponder transmit power, set by master)\n", currentPower);
+        Serial.printf("  RF CHANNEL: %u (follows master)\n", wifiChannel);
         Serial.printf("  TIMEOUT   : %u ms (cycle RF mode if no ping)\n", transponderTimeout);
         Serial.printf("  CSV LOG   : %s (master→TX reception)\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX   : %u s (0=no limit)\n", maxRecordingTimeSec);
@@ -310,7 +331,8 @@ void setup() {
     WiFi.mode(WIFI_STA);
     if (isMaster) {
         prefs.begin("probe", true); 
-        currentRFMode = prefs.getUChar("rfm", 0); 
+        currentRFMode = MODE_STD;   // always boot on standard rate for quick sync (not LR)
+        wifiChannel = prefs.getUChar("wch", 1);
         prefs.end();
         minuteTimer = millis();
     }
@@ -366,12 +388,20 @@ void loop() {
                     case 'd': csvLogDump(); break;
                     case 'e': csvLogErase(); break;
                     case 'm': maxRecordingTimeSec = (uint32_t)val; Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec); break;
+                    case 'n': {
+                        uint8_t ch = (uint8_t)constrain((int)val, 1, 14);
+                        wifiChannel = ch;
+                        prefs.begin("probe", false); prefs.putUChar("wch", wifiChannel); prefs.end();
+                        applyRFSettings(currentRFMode);
+                        Serial.printf(">> Channel set to %u\n", wifiChannel);
+                        break;
+                    }
                 }
             }
         }
 
         if (millis() >= nextPingTime) {
-            nextPingTime = millis() + burstDelay + random(0, 50);
+            nextPingTime = millis() + burstDelay + random(0, 50);  // +0..49 ms jitter to avoid syncing with WiFi beacons
             if (waitingForPong && !plotMode) { 
                 if (lastKnownRSSI > -80.0) { linkCondition = "INTERFERENCE"; interfMinCounter++; }
                 else { linkCondition = "RANGE LIMIT"; rangeMinCounter++; }
@@ -382,6 +412,7 @@ void loop() {
             time_t now; time(&now); struct tm ti; localtime_r(&now, &ti);
             myData.nonce = nonceCounter; myData.txPower = currentPower; myData.targetPower = remoteTargetPower;
             myData.pingInterval = burstDelay; myData.hour = ti.tm_hour; myData.minute = ti.tm_min; myData.second = ti.tm_sec;
+            myData.channel = wifiChannel;
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             digitalWrite(ledPin, HIGH); ledTimer = millis() + 30; currentLEDState = TX_FLASH;
         }
@@ -401,7 +432,11 @@ void loop() {
         }
         if (millis() - lastPacketTime > transponderTimeout) { 
             lastPacketTime = millis(); 
-            cycleTransponderProtocol(); 
+            transponderConsecutiveTimeouts++;
+            if (transponderConsecutiveTimeouts >= TRANSPONDER_CYCLE_AFTER_TIMEOUTS) {
+                transponderConsecutiveTimeouts = 0;
+                cycleTransponderProtocol(); 
+            }
         }
         if (ledTimer != 0 && millis() >= ledTimer) { digitalWrite(ledPin, LOW); ledTimer = 0; }
     }

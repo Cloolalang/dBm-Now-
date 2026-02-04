@@ -1,8 +1,17 @@
-# ESP32 RF Probe & Path Loss Analyzer (v4.21)
+# ESP32 RF Probe & Path Loss Analyzer (v2.5)
 
 ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RSSI; **Transponder** replies and syncs to the master. STD mode uses 802.11 (b/g/n); optional Long Range 250k/500k.
 
-**Protocol:** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping.
+**Purpose:** This project uses the ESP-NOW RSSI measurement capability to provide a **low-cost RF tester** for:
+- Characterising **ESP-NOW protocol performance** and link behaviour
+- Comparing **ESP32 boards** with internal vs external antennas
+- Basic **2.4 GHz propagation testing** (path loss, symmetry, interference)
+- Analysing **passive components** (antennas, cables, connectors) without a VNA or tracking generator
+- Testing **RF shielded enclosures** (e.g. put one unit inside, one outside; compare RSSI/path loss with and without the enclosure)
+
+It can also help explore **2.4 GHz ISM band** channel conditions and **device interoperability** with WiFi, Bluetooth, drone controllers, and other 2.4 GHz systems.
+
+**Protocol:** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 0–49 ms random jitter on each ping interval to avoid accidentally syncing with WiFi beacons (e.g. 100 ms / 102.4 ms TU).
 
 ---
 
@@ -14,6 +23,8 @@ ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RS
     - **GND** → **Master**  
     - **Leave floating or 3.3V** → **Transponder**
   - **LED** on **GPIO 2** (on-board LED on most dev boards).
+
+**External antennas (u.fl cables):** If you use ESP32 dev boards with **u.fl cables and external antennas**, **do not connect the two devices directly** without at least **60 dB of attenuation** between them (e.g. attenuators or sufficient physical separation). Direct connection at full TX power can overload the receiver and damage hardware.
 
 ---
 
@@ -75,6 +86,9 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `d` | Dump log file to Serial (copy to save on PC) |
 | `e` | Erase log file for fresh start |
 | `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
+| `n` + number | Set RF channel 1–14, e.g. `n6`; saved to NVS; transponder follows from payload |
+
+**RF channel:** Both devices **boot on channel 1** and on **ESP-NOW standard rate** (802.11, not Long Range) so they sync quickly. On the **master**, use **`n`** + channel number (e.g. **`n6`**) to set the 2.4 GHz WiFi channel (1–14). Use **`l`** to switch to Long Range (250k/500k) for the session; after reboot both devices are back on standard rate. The channel setting is saved to NVS and sent in each ping. The **transponder** learns the channel in two ways: (1) when it receives a ping, it sets its channel from the payload and stays on it; (2) when it gets **no packet for several consecutive timeouts** (default 3 × timeout), it **cycles through channels 1–14** (and RF modes) to “hunt” for the master. Requiring multiple timeouts avoids cycling on brief fades in marginal conditions—the transponder only hunts when it’s clearly lost. So after you change the channel on the master, the transponder will stop receiving, then after 3 timeouts it will cycle until it hits the new channel and locks to it. Use this for channel-specific propagation tests or to avoid busy channels.
 
 **CSV file logging (master):** Press **`f`** to start logging each pong to a `.csv` file on the ESP32 flash (SPIFFS, path `/log.csv`). Columns: timestamp, nonce, fwdLoss, bwdLoss, symmetry, zeroed, masterRSSI, remoteRSSI. Press **`f`** again to stop. Use **`d`** to print the file to Serial so you can copy it to a file on your PC. Use **`e`** to delete the log file. Use **`m`** + seconds (e.g. **`m300`** = 5 min) to set a max recording time; logging auto-stops when the limit is reached (0 = no limit). Requires a partition with SPIFFS (default 4MB partition usually has it).
 
@@ -83,6 +97,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 ### 4. Transponder behavior
 
 - Listens for master’s pings; replies with RSSI and power.
+- **Follows master’s RF channel** (from payload); sets its channel to match.
 - If no packet for a while, it **cycles RF mode** (STD → 250k → 500k) to match the master.
 - Syncs its time from the master.
 
@@ -97,7 +112,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 
 ## Quick reference
 
-- **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel auto.
+- **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel 1–14. Both boot on **channel 1** and **standard rate** for quick sync; set channel with **`n`**, switch to LR with **`l`** (session only; reboot = STD again).
 - **Role**: GPIO 13 = GND → Master; floating/3.3V → Transponder.
 - **Serial**: 115200, on Master for commands and output.
 
