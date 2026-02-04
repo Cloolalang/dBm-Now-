@@ -158,7 +158,8 @@ Once both boards are flashed and roles are set, power them and open the Master's
 - **Development:** This project was developed using [Cursor](https://cursor.com/) (AI-assisted IDE).
 - **Dependencies:** This firmware uses the [ESP32 Arduino core](https://github.com/espressif/arduino-esp32) (and thus Espressif SDKs). Those projects have their own licenses; ensure your use and distribution comply with GPL v2 and with their terms.
 - **Trademarks:** ESP32, Arduino, and related names are trademarks of their respective owners. This project is not affiliated with or endorsed by them.
-- **RF use:** Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (e.g. FCC, CE, radio licensing). You are responsible for compliance in your jurisdiction.Please take care not to cause RF interference to other users of the band.
+- **RF use:** Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (e.g. FCC, CE, radio licensing). You are responsible for compliance in your jurisdiction. Please take care not to cause RF interference to other users of the band.
+- **Duty cycle / channel utilisation:** In some regions (e.g. EU under ETSI EN 300 328), 2.4 GHz devices that do not use Listen-Before-Talk or similar adaptivity may be subject to **duty cycle or medium-utilisation limits** (e.g. 10% non-adaptive utilisation in EU). Choose **ping interval** (`r`) and **TX power** (`p`, `t`) with these limits in mind; longer intervals and lower power help stay within typical requirements.
 
 ---
 
