@@ -1,4 +1,8 @@
-/* * ======================================================================================
+/*
+ * dBm-Now | ESP32 RF Probe & Path Loss Analyzer
+ * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
+ *
+ * ======================================================================================
  * ESP32 RF PROBE & PATH LOSS ANALYZER | v2.5 (Bitrate Selectable)
  * ======================================================================================
  * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps

@@ -160,11 +160,12 @@ Once both boards are flashed and roles are set, power them and open the Master's
 - **Trademarks:** ESP32, Arduino, and related names are trademarks of their respective owners. This project is not affiliated with or endorsed by them.
 - **RF use:** Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (e.g. FCC, CE, radio licensing). You are responsible for compliance in your jurisdiction. Please take care not to cause RF interference to other users of the band.
 - **Duty cycle / channel utilisation:** In some regions (e.g. EU under ETSI EN 300 328), 2.4 GHz devices that do not use Listen-Before-Talk or similar adaptivity may be subject to **duty cycle or medium-utilisation limits** (e.g. 10% non-adaptive utilisation in EU). Choose **ping interval** (`r`) and **TX power** (`p`, `t`) with these limits in mind; longer intervals and lower power help stay within typical requirements.
+- **Radio amateurs:** In many countries, **licensed radio amateurs** have higher power privileges on 2.4 GHz (e.g. under FCC Part 97 in the US) when operating in the amateur service with callsign and local rules. The ESP32 itself is limited to about **20 dBm (100 mW)**; to run at higher power you must use an **external power amplifier** and comply with your national amateur regulations (identification, band plan, minimum power necessary, etc.).
 
 ---
 
 ## License
 
-**dBm-Now** is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
+**dBm-Now** is free software; you can redistribute it and/or modify it under the terms of the **GNU General Public License version 2** (or, at your option, any later version). See the [LICENSE](LICENSE) file in this repository for the full text.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
