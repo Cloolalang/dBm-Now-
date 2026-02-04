@@ -26,6 +26,11 @@ It can also help explore **2.4 GHz ISM band** channel conditions and **device in
 
 **External antennas (u.fl cables):** If you use ESP32 dev boards with **u.fl cables and external antennas**, **do not connect the two devices directly** without at least **60 dB of attenuation** between them (e.g. attenuators or sufficient physical separation). Direct connection at full TX power can overload the receiver and damage hardware.
 
+**Hardware considerations (thermal, power):**
+- **Thermal:** Transmitting at high TX power and high rates (e.g. short ping intervals) increases chip temperature. The ESP32 uses built-in thermal management and can **automatically reduce TX power** at high temperature (e.g. around 80°C). For sustained high-power or high-rate testing, ensure adequate **ventilation** and avoid enclosing the board in a sealed box without cooling. Very short ping intervals (e.g. under 100 ms) with high power can heat the device over time; allow airflow or reduce power/rate for long runs.
+- **Power supply:** RF performance can become unstable if the supply voltage is too low (e.g. below about 2.8 V). Use a stable **3.3 V** supply and avoid marginal USB cables or weak batteries when running at high power. A typical ESP32 dev board can draw **up to about 250–500 mA** when the WiFi radio is transmitting at high power (chip TX alone is often ~240 mA at max TX power; the board adds LEDs, regulator, and other loads). Ensure your USB port, cable, or external supply can deliver at least **500 mA** for reliable operation at high TX power.
+- **Receiver sensitivity and measurement repeatability:** For better RSSI/path-loss repeatability and less influence from the environment, house the dev boards in **metal enclosures** and use **U.FL to SMA adapter cables** so antennas (or attenuators) are outside the enclosure. This reduces coupling to nearby objects and improves consistency when comparing runs or boards.
+
 ---
 
 ## Software setup (Arduino IDE)
@@ -88,7 +93,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
 | `n` + number | Set RF channel 1–14, e.g. `n6`; saved to NVS; transponder follows from payload |
 
-**RF channel:** Both devices **boot on channel 1** and on **ESP-NOW standard rate** (802.11, not Long Range) so they sync quickly. On the **master**, use **`n`** + channel number (e.g. **`n6`**) to set the 2.4 GHz WiFi channel (1–14). Use **`l`** to switch to Long Range (250k/500k) for the session; after reboot both devices are back on standard rate. The channel setting is saved to NVS and sent in each ping. The **transponder** learns the channel in two ways: (1) when it receives a ping, it sets its channel from the payload and stays on it; (2) when it gets **no packet for several consecutive timeouts** (default 3 × timeout), it **cycles through channels 1–14** (and RF modes) to “hunt” for the master. Requiring multiple timeouts avoids cycling on brief fades in marginal conditions—the transponder only hunts when it’s clearly lost. So after you change the channel on the master, the transponder will stop receiving, then after 3 timeouts it will cycle until it hits the new channel and locks to it. Use this for channel-specific propagation tests or to avoid busy channels.
+**RF channel:** Both devices **boot on channel 1** and on **ESP-NOW standard rate** (802.11, not Long Range) so they sync quickly. On the **master**, use **`n`** + channel number (e.g. **`n6`**) to set the 2.4 GHz WiFi channel (1–14). Use **`l`** to switch to Long Range (250k/500k) for the session; after reboot both devices are back on standard rate. **For Long Range modes, keep the master sending rate (ping interval, `r`) at least 25 ms.** The channel setting is saved to NVS and sent in each ping. The **transponder** learns the channel in two ways: (1) when it receives a ping, it sets its channel from the payload and stays on it; (2) when it gets **no packet for several consecutive timeouts** (default 3 × timeout), it **cycles through channels 1–14** (and RF modes) to “hunt” for the master. Requiring multiple timeouts avoids cycling on brief fades in marginal conditions—the transponder only hunts when it’s clearly lost. So after you change the channel on the master, the transponder will stop receiving, then after 3 timeouts it will cycle until it hits the new channel and locks to it. Use this for channel-specific propagation tests or to avoid busy channels.
 
 **CSV file logging (master):** Press **`f`** to start logging each pong to a `.csv` file on the ESP32 flash (SPIFFS, path `/log.csv`). Columns: timestamp, nonce, fwdLoss, bwdLoss, symmetry, zeroed, masterRSSI, remoteRSSI. Press **`f`** again to stop. Use **`d`** to print the file to Serial so you can copy it to a file on your PC. Use **`e`** to delete the log file. Use **`m`** + seconds (e.g. **`m300`** = 5 min) to set a max recording time; logging auto-stops when the limit is reached (0 = no limit). Requires a partition with SPIFFS (default 4MB partition usually has it).
 
@@ -108,6 +113,14 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 - **Plot mode** (`v`): Use for logging into a spreadsheet (e.g. fwd/bwd/symmetry/zeroed).
 - **Power**: Master `p` and remote `t` affect link budget; lower power helps test sensitivity.
 
+### 6. ESP32 optimisations
+
+The sketch applies a few RF/radio settings for consistent behaviour:
+
+- **Second channel (HT40) off** — The channel is set with `WIFI_SECOND_CHAN_NONE`, so the radio uses 20 MHz only (no 40 MHz wide channel). This avoids extra complexity and keeps operation compatible with all ESP-NOW modes.
+- **WiFi modem sleep off** — `esp_wifi_set_ps(WIFI_PS_NONE)` is called in `setup()`. The WiFi modem stays awake so ping/pong latency is consistent and round-trip times are predictable. For **battery operation** you can change this to `WIFI_PS_MIN_MODEM` (or `WIFI_PS_MAX_MODEM`) in the sketch to allow modem sleep when idle; expect higher and more variable latency.
+- **WiFi only** — ESP-NOW needs the WiFi radio; the sketch uses `WiFi.mode(WIFI_STA)` and does not connect to an AP. Bluetooth is not used; if your board supports it, you can disable Bluetooth in the Arduino IDE board options (e.g. "Bluetooth" → Disabled) to free RAM and avoid any radio scheduling overlap.
+
 ---
 
 ## Quick reference
@@ -124,10 +137,15 @@ Once both boards are flashed and roles are set, power them and open the Master�
 
 - **TRX relay controller** — Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** — Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
+- **RF characterisation** — Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
 - **Unicast mode with 802.11 PHY statistics** — Unicast operation with PHY stats (retries, etc.) for link analysis.
 - **MAC address control and display** — Set and show MAC addresses for peer identification and filtering.
 - **Android-based master controller** — Master UI/control from an Android device via OTG cable.
 - **Promiscuous mode noise floor test** — Use promiscuous mode to measure channel noise floor.
+- **RF overload detection** — Detect when the receiver is overloaded (e.g. antennas too close or insufficient attenuation) and warn or protect the link.
+- **Configurable PHY rate for standard mode** — Option to set ESP-NOW PHY rate above the default 1 Mbps (e.g. 24M, 54M, or 802.11n MCS rates) for higher throughput at short range, with tradeoff of range/reliability.
+- **Hardware design with rechargeable battery** — Reference or suggested hardware design for a battery-powered unit with rechargeable battery and charging circuitry.
+- **SD card** — Hardware and firmware support for recording results to SD card (e.g. in addition to or instead of SPIFFS).
 
 ---
 
@@ -136,7 +154,7 @@ Once both boards are flashed and roles are set, power them and open the Master�
 - **Development:** This project was developed using [Cursor](https://cursor.com/) (AI-assisted IDE).
 - **Dependencies:** This firmware uses the [ESP32 Arduino core](https://github.com/espressif/arduino-esp32) (and thus Espressif SDKs). Those projects have their own licenses; ensure your use and distribution comply with GPL v2 and with their terms.
 - **Trademarks:** ESP32, Arduino, and related names are trademarks of their respective owners. This project is not affiliated with or endorsed by them.
-- **RF use:** Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (e.g. FCC, CE, radio licensing). You are responsible for compliance in your jurisdiction.
+- **RF use:** Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (e.g. FCC, CE, radio licensing). You are responsible for compliance in your jurisdiction.Please take care not to cause RF interferace to other users of the band.
 
 ---
 

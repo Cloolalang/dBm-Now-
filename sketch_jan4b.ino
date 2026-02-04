@@ -329,6 +329,8 @@ void setup() {
     deviceRole = isMaster ? "MASTER" : "TRANSPONDER";
     
     WiFi.mode(WIFI_STA);
+    // Disable WiFi modem sleep for consistent ping/pong latency (use WIFI_PS_MIN_MODEM for battery if needed)
+    esp_wifi_set_ps(WIFI_PS_NONE);
     if (isMaster) {
         prefs.begin("probe", true); 
         currentRFMode = MODE_STD;   // always boot on standard rate for quick sync (not LR)
