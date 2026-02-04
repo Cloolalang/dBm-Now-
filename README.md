@@ -1,6 +1,6 @@
-# ESP32 RF Probe & Path Loss Analyzer (v2.5)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v2.5)
 
-ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RSSI; **Transponder** replies and syncs to the master. STD mode uses 802.11 (b/g/n); optional Long Range 250k/500k.
+ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master. STD mode uses 802.11 (b/g/n); optional Long Range 250k/500k.
 
 **Purpose:** This project uses the ESP-NOW RSSI measurement capability to provide a **low-cost RF tester** for:
 - Characterising **ESP-NOW protocol performance** and link behaviour
