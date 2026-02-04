@@ -1,6 +1,8 @@
-# ESP32 RF Probe & Path Loss Analyzer (v4.18)
+# ESP32 RF Probe & Path Loss Analyzer (v4.21)
 
-ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RSSI; **Transponder** replies and syncs to the master. Uses Japan region, Channel 14, with 802.11b or Long Range (250k/500k) modes.
+ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RSSI; **Transponder** replies and syncs to the master. STD mode uses 802.11 (b/g/n); optional Long Range 250k/500k.
+
+**Protocol:** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping.
 
 ---
 
@@ -15,9 +17,7 @@ ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RS
 
 ---
 
-## Software setup
-
-### Option A: Arduino IDE 2.x
+## Software setup (Arduino IDE)
 
 1. **Install ESP32 core**
    - File → Preferences → Additional Board Manager URLs:
@@ -36,24 +36,7 @@ ESP-NOW based RF link tester: **Master** sends pings and measures path loss / RS
    - Open `sketch_jan4b/sketch_jan4b.ino` (the folder name must stay `sketch_jan4b` so the .ino is in a folder of the same name).
 
 5. **Upload**
-   - Connect one ESP32, set role with ROLE_PIN, then Sketch → Upload. Repeat for the second ESP32 with the other role.
-
-### Option B: PlatformIO (CLI / VS Code)
-
-*Requires [PlatformIO](https://platformio.org/) (VS Code extension or CLI).*
-
-1. **Open project**
-   - In VS Code: Open Folder → `sketch_jan4b` (the folder that contains `platformio.ini`).
-   - Or in terminal: `cd sketch_jan4b` then `pio run` / `pio run -t upload`.
-
-2. **Build**
-   - `pio run`
-
-3. **Upload**
-   - `pio run -t upload` (set role via ROLE_PIN before uploading each device).
-
-4. **Serial monitor**
-   - `pio device monitor -b 115200`
+   - **The same sketch is uploaded to both devices.** Master vs Transponder is determined by hardware (ROLE_PIN): connect one ESP32, set GPIO 13 for the role you want, then Sketch → Upload. Repeat for the second ESP32 with the other role.
 
 ---
 
@@ -78,7 +61,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 
 | Key | Action |
 |-----|--------|
-| `l` | Cycle RF mode: STD (802.11b) → 250k → 500k (saves to NVS, restarts) |
+| `l` | Cycle RF mode: STD (802.11) → 250k → 500k (saves to NVS, restarts) |
 | `p` + number | Set master TX power (dBm), e.g. `p14` |
 | `t` + number | Set remote (transponder) target power (dBm), e.g. `t8` |
 | `s` | Set remote target power = current master power |
@@ -88,6 +71,14 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |
 | `z` | Reset calibration (zero reference) |
 | `c` | Reset minute counters (interference/range stats) |
+| `f` | Toggle CSV file logging to SPIFFS (`/log.csv`) |
+| `d` | Dump log file to Serial (copy to save on PC) |
+| `e` | Erase log file for fresh start |
+| `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
+
+**CSV file logging (master):** Press **`f`** to start logging each pong to a `.csv` file on the ESP32 flash (SPIFFS, path `/log.csv`). Columns: timestamp, nonce, fwdLoss, bwdLoss, symmetry, zeroed, masterRSSI, remoteRSSI. Press **`f`** again to stop. Use **`d`** to print the file to Serial so you can copy it to a file on your PC. Use **`e`** to delete the log file. Use **`m`** + seconds (e.g. **`m300`** = 5 min) to set a max recording time; logging auto-stops when the limit is reached (0 = no limit). Requires a partition with SPIFFS (default 4MB partition usually has it).
+
+**CSV file logging (transponder) — one-way link testing:** On the **transponder**, connect Serial and press **`f`** to start logging each **received ping** (master→transponder) to `/log.csv`. Columns: timestamp, nonce, rfMode, rssi, masterPwr, pathLoss, transponderPwr. Optionally set **`m`** + seconds (e.g. **`m300`**) so logging auto-stops after that time (0 = no limit). Then **walk away with the master**; even when the master gets NO REPLY (one-way link), the transponder keeps logging every packet it receives until you stop or the max time is reached. When you return, connect Serial to the transponder and press **`d`** to dump the log, then copy to your PC. Press **`f`** again to stop logging, or **`e`** to erase the file. Transponder commands: **`f`** toggle log, **`d`** dump, **`e`** erase, **`m`** max time (seconds), **`h`** status.
 
 ### 4. Transponder behavior
 
@@ -106,7 +97,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 
 ## Quick reference
 
-- **RF**: Japan, **Channel 14**; 802.11b or LR 250k/500k.
+- **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel auto.
 - **Role**: GPIO 13 = GND → Master; floating/3.3V → Transponder.
 - **Serial**: 115200, on Master for commands and output.
 
