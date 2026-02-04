@@ -117,3 +117,31 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 - **Serial**: 115200, on Master for commands and output.
 
 Once both boards are flashed and roles are set, power them and open the Master’s Serial Monitor to test and develop.
+
+---
+
+## Planned features
+
+- **TRX relay controller** — Antenna switching (e.g. for T/R or diversity setups).
+- **RF measurement calibration** — Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
+- **Unicast mode with 802.11 PHY statistics** — Unicast operation with PHY stats (retries, etc.) for link analysis.
+- **MAC address control and display** — Set and show MAC addresses for peer identification and filtering.
+- **Android-based master controller** — Master UI/control from an Android device via OTG cable.
+- **Promiscuous mode noise floor test** — Use promiscuous mode to measure channel noise floor.
+
+---
+
+## Legal and compliance
+
+- **Development:** This project was developed using [Cursor](https://cursor.com/) (AI-assisted IDE).
+- **Dependencies:** This firmware uses the [ESP32 Arduino core](https://github.com/espressif/arduino-esp32) (and thus Espressif SDKs). Those projects have their own licenses; ensure your use and distribution comply with GPL v2 and with their terms.
+- **Trademarks:** ESP32, Arduino, and related names are trademarks of their respective owners. This project is not affiliated with or endorsed by them.
+- **RF use:** Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (e.g. FCC, CE, radio licensing). You are responsible for compliance in your jurisdiction.
+
+---
+
+## License
+
+**dBm-Now** is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
