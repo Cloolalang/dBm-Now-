@@ -1,0 +1,19 @@
+# PlatformIO
+.pio/
+.piolibdeps/
+.vscode/.browse.cwd.bak
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# Arduino / IDE
+*.ino.bak
+*.ino.orig
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
