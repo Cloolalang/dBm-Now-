@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.2)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.3)
 
 ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master.
 
@@ -120,7 +120,7 @@ This project does **not** use any third-party libraries. All code relies on the 
    - **TX** is the MAC address of the replying transponder (so you can identify which unit replied). Press **`h`** for full status; the status table shows each device’s **MAC address** and **ESP-NOW mode** (master: TX broadcast, RX unicast; transponder: RX broadcast, TX unicast) for both boards.
 4. **LED on GPIO 2**: blinks on TX (and on transponder on RX).
 
-If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance, antennas, and power (see below).
+If you see `[NO REPLY]` with **INTERFERENCE** (last RSSI was high → likely collision) or **SIGNAL TOO LOW** (last RSSI was low → likely range), check distance, antennas, and power (see below).
 
 **Serial output format:**
 - **Master** (incoming pongs): `[HH:MM:SS] N:... | TX aa:bb:cc:dd:ee:ff | FWD Loss:... | BWD Loss:... | Sym:... | Z:...` — **TX** is the transponder’s MAC address.
@@ -139,8 +139,8 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `r` + number | Set ping interval (ms), e.g. `r500` |
 | `h` | Print detailed status |
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |
-| `z` | Reset calibration (zero reference) |
-| `c` | Reset minute counters (interference/range stats) |
+| `z` | Zero cal: set reference from last RSSI so **Z** = delta from that point (or on next pong if none yet) |
+| `c` | Reset minute counters (interference / signal-too-low stats) |
 | `f` | Toggle CSV file logging to SPIFFS (`/log.csv`) |
 | `d` | Dump log file to Serial (copy to save on PC) |
 | `e` | Erase log file for fresh start |

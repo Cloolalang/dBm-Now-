@@ -3,12 +3,12 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.2 (Bitrate Selectable, Promiscuous Scan)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.3 (Bitrate Selectable, Promiscuous Scan)
  * ======================================================================================
  * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps
  */
 
-#define FW_VERSION "3.2"
+#define FW_VERSION "3.3"
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -289,7 +289,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         float t_tx_eff = (pong.txPower != 0) ? pong.txPower : remoteTargetPower;
         float bwdLoss = t_tx_eff - mRSSI;
         float symmetry = fwdLoss - bwdLoss;
-        if (!calibrated && referenceRSSI == 1.0) { referenceRSSI = mRSSI; calibrated = true; }
+        if (!calibrated && referenceRSSI == 1.0f) { referenceRSSI = mRSSI; calibrated = true; }
         float zeroed = calibrated ? (mRSSI - referenceRSSI) : 0;
 
         if (!plotMode) {
@@ -454,7 +454,7 @@ void loop() {
         } else {
         handleLED();
         if (millis() - minuteTimer >= 60000) {
-            Serial.printf("\n>>> [MINUTE SUMMARY] Interference: %u | Range Limit: %u <<<\n\n", interfMinCounter, rangeMinCounter);
+            Serial.printf("\n>>> [MINUTE SUMMARY] Interference: %u | Signal too low: %u <<<\n\n", interfMinCounter, rangeMinCounter);
             interfMinCounter = 0; rangeMinCounter = 0; minuteTimer = millis();
         }
 
@@ -483,7 +483,18 @@ void loop() {
                     case 'h': printDetailedStatus(); break;
                     case 's': remoteTargetPower = currentPower; break;
                     case 'c': interfMinCounter = 0; rangeMinCounter = 0; Serial.println(">> Stats Reset."); break;
-                    case 'z': calibrated = false; referenceRSSI = 1.0; break;
+                    case 'z': {
+                        if (lastKnownRSSI > -95.0f) {
+                            referenceRSSI = lastKnownRSSI;
+                            calibrated = true;
+                            if (!plotMode) Serial.printf(">> Zero cal: reference set to %.1f dBm (Z = delta from now)\n", referenceRSSI);
+                        } else {
+                            calibrated = false;
+                            referenceRSSI = 1.0f;
+                            if (!plotMode) Serial.println(">> Zero cal: no pong yet; reference will be set on next pong.");
+                        }
+                        break;
+                    }
                     case 'x':
                         prefs.begin("probe", false); prefs.clear(); prefs.end();
                         Serial.println(">> RF preference cleared. Restarting (next boot = STD)...");
@@ -514,8 +525,9 @@ void loop() {
         if (millis() >= nextPingTime) {
             nextPingTime = millis() + burstDelay + random(0, 50);  // +0..49 ms jitter to avoid syncing with WiFi beacons
             if (waitingForPong && !plotMode) { 
+                // High last RSSI → likely collision (interference); low last RSSI → likely range/signal too low
                 if (lastKnownRSSI > -80.0) { linkCondition = "INTERFERENCE"; interfMinCounter++; }
-                else { linkCondition = "RANGE LIMIT"; rangeMinCounter++; }
+                else { linkCondition = "SIGNAL TOO LOW"; rangeMinCounter++; }
                 Serial.printf("[%s] N:%u | [NO REPLY] | %s\n", getFastTimestamp().c_str(), nonceCounter, linkCondition.c_str());
                 if (nonceCounter == 3) Serial.println(">> Tip: Transponder GPIO13 must be HIGH/floating (not GND). Same sketch on both? Wait 15s for RF mode sync.");
             }
