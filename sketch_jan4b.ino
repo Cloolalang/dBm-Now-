@@ -63,6 +63,10 @@ uint8_t wifiChannel = 1;
 #define PENDING_CHANNEL_PINGS 3
 uint8_t pendingChannel = 0;       // 0 = none; else target channel to switch to after PENDING_CHANNEL_PINGS pings
 uint8_t pendingChannelPingsSent = 0;
+// Master: same for RF mode (STD / LR 250k / LR 500k)
+#define PENDING_RF_PINGS 3
+uint8_t pendingRFMode = 3;        // 3 = none; 0/1/2 = target mode to switch to after PENDING_RF_PINGS pings
+uint8_t pendingRFModePingsSent = 0;
 
 // Promiscuous test mode (master only): channel scan for occupancy / noise proxy
 bool promiscuousMode = false;
@@ -90,6 +94,7 @@ typedef struct {
     uint32_t pingInterval; 
     uint8_t hour; uint8_t minute; uint8_t second;
     uint8_t channel;  // RF channel 1–14
+    uint8_t rfMode;   // 0=STD, 1=LR 250k, 2=LR 500k
 } Payload;
 Payload myData, txData, rxData;
 
@@ -333,6 +338,10 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             }
         }
         setESP32Time(rxData.hour, rxData.minute);
+        if (rxData.rfMode <= 2 && rxData.rfMode != currentRFMode) {
+            currentRFMode = rxData.rfMode;
+            applyRFSettings(currentRFMode);
+        }
         if (rxData.channel >= 1 && rxData.channel <= 14 && rxData.channel != wifiChannel) {
             wifiChannel = rxData.channel;
             esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
@@ -356,6 +365,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         txData.nonce = rxData.nonce;
         txData.txPower = currentPower;
         txData.channel = wifiChannel;
+        txData.rfMode = currentRFMode;
         txData.measuredRSSI = (float)info->rx_ctrl->rssi; 
         esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
         digitalWrite(ledPin, HIGH); ledTimer = millis() + 40;
@@ -465,11 +475,14 @@ void loop() {
                 float val = Serial.parseFloat();
                 switch (cmd) {
                     case 'P': promiscuousEnter(); break;
-                    case 'l': 
-                        currentRFMode = (currentRFMode + 1) % 3;
-                        prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end(); 
-                        delay(100); ESP.restart(); 
+                    case 'l': {
+                        uint8_t nextMode = (currentRFMode + 1) % 3;
+                        pendingRFMode = nextMode;
+                        pendingRFModePingsSent = 0;
+                        const char* modeStr = (pendingRFMode == MODE_STD) ? "STD (802.11)" : (pendingRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
+                        if (!plotMode) Serial.printf(">> Switching to %s after %u pings (transponder switches first)\n", modeStr, (unsigned)PENDING_RF_PINGS);
                         break;
+                    }
                     case '0': 
                         currentRFMode = MODE_STD;
                         prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end(); 
@@ -536,6 +549,7 @@ void loop() {
             myData.nonce = nonceCounter; myData.txPower = currentPower; myData.targetPower = remoteTargetPower;
             myData.pingInterval = burstDelay; myData.hour = ti.tm_hour; myData.minute = ti.tm_min; myData.second = ti.tm_sec;
             myData.channel = (pendingChannel != 0) ? pendingChannel : wifiChannel;  // send target channel so transponder can switch first
+            myData.rfMode = (pendingRFMode <= 2) ? pendingRFMode : currentRFMode;   // send target RF mode so transponder can switch first
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;
@@ -545,6 +559,17 @@ void loop() {
                     pendingChannelPingsSent = 0;
                     applyRFSettings(currentRFMode);
                     if (!plotMode) Serial.printf(">> Now on channel %u\n", wifiChannel);
+                }
+            }
+            if (pendingRFMode <= 2) {
+                pendingRFModePingsSent++;
+                if (pendingRFModePingsSent >= PENDING_RF_PINGS) {
+                    currentRFMode = pendingRFMode;
+                    pendingRFMode = 3;
+                    pendingRFModePingsSent = 0;
+                    prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end();
+                    applyRFSettings(currentRFMode);
+                    if (!plotMode) Serial.printf(">> Now on %s\n", (currentRFMode == MODE_STD) ? "STD (802.11)" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k");
                 }
             }
             digitalWrite(ledPin, HIGH); ledTimer = millis() + 30; currentLEDState = TX_FLASH;
