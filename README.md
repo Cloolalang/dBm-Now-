@@ -17,6 +17,8 @@ It can also help explore **2.4 GHz ISM band** channel conditions and **device in
 
 The following describes the stack **from the physical layer up to the application**, so the RF channel and radio come first, then how frames are sent, then what is in them.
 
+**ESP-NOW (Espressif protocol):** ESP-NOW is a **connectionless Wi-Fi protocol** defined by Espressif. Data is sent in **vendor-specific action frames** (category 127, OUI 0x18fe34) from one Wi-Fi device to another without connecting to an access point. Two protocol versions exist: **v1.0** (max payload 250 bytes) and **v2.0** (max payload 1470 bytes). v2.0 devices can receive from both; v1.0 devices only from other v1.0 devices (or from v2.0 if the packet is ≤250 bytes). This firmware uses a 24-byte payload, so it is compatible with both. The implementation is part of **ESP-IDF** (and the ESP32 Arduino core); optional encryption uses CCMP with PMK/LMK. Default PHY rate is 1 Mbps; up to 20 peers are supported (6 encrypted by default).
+
 **PHY (physical layer):** In **standard mode** the radio uses **802.11 b/g/n** in the **2.4 GHz ISM band**: **DSSS** (1-11 Mbps) for 11b, **OFDM** for 11g/n. Channel **bandwidth** is **20 MHz** (no secondary channel). Default ESP-NOW PHY rate is **1 Mbps**; higher rates are possible but not configured in this sketch. In **Long Range mode** the radio uses Espressif's **LR modulation** (250 kbps or 500 kbps), with longer symbol times and better sensitivity at the cost of throughput.
 
 **On-air time (approximate):** At **1 Mbps** (standard mode), air time ≈ (PLCP preamble + PLCP header + MAC header + payload + FCS) in bits ÷ 1 Mbps. With 802.11b short preamble (~120 µs) and ~52 bytes of MAC + 24-byte payload + FCS (~416 bits at 1 Mbps), total is about **0.5–0.6 ms** per packet. At **Long Range 250 kbps**, the payload alone is 192 bits ÷ 250 kbps ≈ **0.77 ms**; with preamble and headers (structure is chip-dependent), total is typically on the order of **1–2 ms** per packet. At **500 kbps** LR, payload air time is about half that.
@@ -69,6 +71,24 @@ The following describes the stack **from the physical layer up to the applicatio
 
 5. **Upload**
    - **The same sketch is uploaded to both devices.** Master vs Transponder is determined by hardware (ROLE_PIN): connect one ESP32, set GPIO 13 for the role you want, then Sketch -> Upload. Repeat for the second ESP32 with the other role.
+
+---
+
+## Dependencies
+
+This project does **not** use any third-party libraries. All code relies on the **ESP32 Arduino core** (by Espressif) and the C/POSIX toolchain it provides.
+
+| Include / feature | Provided by | Purpose |
+|------------------|-------------|---------|
+| `esp_now.h` | ESP32 Arduino (esp_wifi) | ESP-NOW init, send, recv, peers |
+| `WiFi.h` | ESP32 Arduino | `WiFi.mode(WIFI_STA)` |
+| `esp_wifi.h` | ESP32 Arduino (esp_wifi) | Channel, protocol, TX power, promiscuous mode |
+| `Preferences.h` | ESP32 Arduino | NVS: save RF mode and channel across reboots |
+| `FS.h` | ESP32 Arduino | Filesystem abstraction |
+| `SPIFFS.h` | ESP32 Arduino | SPIFFS for CSV log file (`/log.csv`) |
+| `time.h` / `sys/time.h` | Toolchain (C/POSIX) | RTC/time for timestamps |
+
+**Tested with:** Arduino core for **ESP32 by Espressif** **3.x** (ESP-IDF v5.5), on **ESP32 Dev Module** (ESP32-WROOM-32). Other 3.x versions with ESP-IDF v5.x should be compatible; if you use a different core or IDF version, API changes (e.g. promiscuous callback signature) may require small code updates. Check *Tools → Board → Boards Manager* for your installed core version.
 
 ---
 
@@ -152,6 +172,14 @@ The sketch applies a few RF/radio settings for consistent behaviour:
 - **Serial**: 115200, on Master for commands and output.
 
 Once both boards are flashed and roles are set, power them and open the Master's Serial Monitor to test and develop.
+
+---
+
+## Links
+
+- **[ESP-NOW source (Espressif)](https://github.com/espressif/esp-now)** — Official ESP-NOW component and examples.
+- **[ESP-NOW API (ESP-IDF)](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_now.html)** — ESP-NOW API reference in the ESP-IDF programming guide.
+- **[ESP-IDF Wi-Fi / espnow example](https://github.com/espressif/esp-idf/tree/master/examples/wifi/espnow)** — Example usage of ESP-NOW in ESP-IDF.
 
 ---
 
