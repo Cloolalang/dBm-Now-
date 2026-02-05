@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.0)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.2)
 
 ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master.
 
@@ -27,7 +27,19 @@ The following describes the stack **from the physical layer up to the applicatio
 
 **MAC / protocol:** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** -- if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 0-49 ms random jitter on each ping interval to avoid accidentally syncing with WiFi beacons (e.g. 100 ms / 102.4 ms TU). ESP-NOW uses a **management frame format** (vendor-specific); other WiFi devices (phones, laptops, routers) cannot decode ESP-NOW traffic directly -- they may see it as management or vendor traffic but will not interpret the payload. Because the **PHY is standard 802.11**, local WiFi devices **do see ESP-NOW transmissions for carrier-sense / collision avoidance (CSMA/CA)**: the channel appears busy during an ESP-NOW packet, so other stations defer and avoid colliding with it. The **ESP-NOW transmitter itself uses 802.11 CSMA/CA** (listen before talk, backoff if busy) via the WiFi MAC before each send.
 
-**Packet structure:** Both **ping** (Master to Transponder) and **pong** (Transponder to Master) use the same **Payload** struct (24 bytes): `nonce`, `txPower`, `measuredRSSI`, `targetPower`, `pingInterval`, `hour`/`minute`/`second`, `channel`. On the ping, the master sends its TX power, target power, time, and channel; the transponder echoes the nonce and fills in its TX power and the **measured RSSI** of the received ping. The over-the-air frame also includes 802.11 and ESP-NOW headers before the payload.
+**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (24 bytes). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
+
+| Field | Type | Ping (master sends) | Pong (transponder sends) |
+|-------|------|---------------------|--------------------------|
+| `nonce` | uint32_t | Sequence number (incremented each ping) | Echo of received nonce |
+| `txPower` | float | Master TX power (dBm) | Transponder TX power (dBm) |
+| `measuredRSSI` | float | Not used (0) | RSSI of the received ping (dBm) |
+| `targetPower` | float | Desired transponder TX power (dBm) | Echo of received targetPower |
+| `pingInterval` | uint32_t | Master ping interval (ms) | Echo of received pingInterval |
+| `hour`, `minute`, `second` | uint8_t | Master RTC time | Echo of received time (transponder syncs its clock) |
+| `channel` | uint8_t | RF channel 1–14: current channel, or **target channel** during a channel change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF channel |
+
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, and channel (current or pending target). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower` and `channel`; and fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry).
 
 **Encryption:** ESP-NOW is used **without encryption** in this firmware (`peerInfo.encrypt = false`). All payloads are sent in the clear. Do not use for sensitive data.
 
@@ -103,11 +115,17 @@ This project does **not** use any third-party libraries. All code relies on the 
 
 1. Power both boards (USB or 3.3V).
 2. Open Serial Monitor on the **Master** (115200 baud).
-3. You should see periodic status and lines like:
-   - `[HH:MM:SS] N:... | FWD Loss:... | BWD Loss:... | Sym:... | Z:...`
+3. You should see periodic status and incoming pong lines like:
+   - `[HH:MM:SS] N:... | TX aa:bb:cc:dd:ee:ff | FWD Loss:... | BWD Loss:... | Sym:... | Z:...`
+   - **TX** is the MAC address of the replying transponder (so you can identify which unit replied). Press **`h`** for full status; the status table shows each device’s **MAC address** and **ESP-NOW mode** (master: TX broadcast, RX unicast; transponder: RX broadcast, TX unicast) for both boards.
 4. **LED on GPIO 2**: blinks on TX (and on transponder on RX).
 
 If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance, antennas, and power (see below).
+
+**Serial output format:**
+- **Master** (incoming pongs): `[HH:MM:SS] N:... | TX aa:bb:cc:dd:ee:ff | FWD Loss:... | BWD Loss:... | Sym:... | Z:...` — **TX** is the transponder’s MAC address.
+- **Transponder** (incoming pings): `[HH:MM:SS] RX N=... | Mstr aa:bb:cc:dd:ee:ff | mode | RSSI:... dBm | Mstr Pwr:... | Path Loss:... | TX Pwr:...` — **Mstr** is the master’s MAC; **TX Pwr** is the transponder’s transmit power (set by master).
+- **Status** (`h` on either device): Shows RF protocol, channel, **MAC address**, **ESP-NOW mode** (TX/RX broadcast vs unicast), and role-specific settings.
 
 ### 3. Master serial commands (115200 baud)
 
@@ -117,7 +135,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `p` + number | Set master TX power (dBm), e.g. `p14` |
 | `t` + number | Set remote (transponder) target power (dBm), e.g. `t8` |
 | `s` | Set remote target power = current master power |
-| `v` | Toggle plot mode (CSV-style output) |
+| `v` | Toggle plot mode (CSV-style output: channel, fwdLoss, bwdLoss, symmetry, zeroed) |
 | `r` + number | Set ping interval (ms), e.g. `r500` |
 | `h` | Print detailed status |
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |
@@ -127,13 +145,13 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `d` | Dump log file to Serial (copy to save on PC) |
 | `e` | Erase log file for fresh start |
 | `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
-| `n` + number | Set RF channel 1-14, e.g. `n6`; saved to NVS; transponder follows from payload |
+| `n` + number | Set RF channel 1-14, e.g. `n6`; master sends new channel in payload for 3 pings before switching so transponder can switch first (quicker link re-establishment); saved to NVS |
 | `P` | **Start promiscuous scan** (master only): sweep channels 1–14 repeatedly; report packet count, avg/min RSSI, busy % per channel |
 | `E` or `e` | **Exit** promiscuous scan; resumes ESP-NOW |
 
 **Promiscuous test mode (master only):** Send **`P`** (uppercase) to stop ESP-NOW and enter WiFi promiscuous mode. The master sweeps channels 1–14, dwelling ~2.1 s per channel, and prints one line per channel: **Ch \| Pkts \| AvgRSSI \| MinRSSI \| Busy%**. It keeps scanning (1→14, then 1→14 again) until you send **`E`** or **`e`** to exit; then ESP-NOW is restored. Use this to see which channels are busy and typical signal levels. Promiscuous mode and ESP-NOW cannot run at the same time, so the link is paused during the scan.
 
-**RF channel:** Both devices **boot on channel 1** and on **ESP-NOW standard rate** (802.11, not Long Range) so they sync quickly. On the **master**, use **`n`** + channel number (e.g. **`n6`**) to set the 2.4 GHz WiFi channel (1-14). Use **`l`** to switch to Long Range (250k/500k) for the session; after reboot both devices are back on standard rate. **For Long Range modes, keep the master sending rate (ping interval, `r`) at least 25 ms.** The channel setting is saved to NVS and sent in each ping. The **transponder** learns the channel in two ways: (1) when it receives a ping, it sets its channel from the payload and stays on it; (2) when it gets **no packet for several consecutive timeouts** (default 3 x timeout), it **cycles through channels 1-14** (and RF modes) to "hunt" for the master. Requiring multiple timeouts avoids cycling on brief fades in marginal conditions--the transponder only hunts when it's clearly lost. So after you change the channel on the master, the transponder will stop receiving, then after 3 timeouts it will cycle until it hits the new channel and locks to it. Use this for channel-specific propagation tests or to avoid busy channels.
+**RF channel:** Both devices **boot on channel 1** and on **ESP-NOW standard rate** (802.11, not Long Range) so they sync quickly. On the **master**, use **`n`** + channel number (e.g. **`n6`**) to set the 2.4 GHz WiFi channel (1-14). The master **sends the new channel in the payload for 3 pings** while still on the current channel; the **transponder** receives those pings and switches to the new channel. Then the master switches. This gives quicker link re-establishment than switching the master first (which would require the transponder to hunt). The channel is saved to NVS and sent in each ping. The transponder also **hunts** (cycles channels 1-14 and RF modes) when it gets **no packet for several consecutive timeouts** (default 3 x timeout). Use **`l`** to switch to Long Range (250k/500k) for the session; after reboot both devices are back on standard rate. **For Long Range modes, keep the master sending rate (ping interval, `r`) at least 25 ms.** Use this for channel-specific propagation tests or to avoid busy channels.
 
 **Maximum range (shoot-out mode):** For the longest radio range, set **Long Range 250 kbps** (**`l`** until you see 250k), **max TX power** on both master (**`p`** + 20 or highest) and transponder (**`t`** + 20 or highest via master target), and a **ping interval of at least 25 ms** (**`r`** + value). **Theoretical open-ground range with panel antennas:** Using a simple free-space link budget (e.g. 20 dBm TX, LR 250k receiver sensitivity on the order of −100 dBm, 10–12 dBi gain per side, 15 dB margin for fading/terrain), **theoretical line-of-sight range is on the order of 20–30 km** with directional panels pointed at each other. Real-world open ground will be less due to multipath, ground reflection, and obstacles; actual range depends on antenna gain, feed loss, and local conditions.
 
@@ -144,6 +162,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 ### 4. Transponder behavior
 
 - Listens for master's pings; replies with RSSI and power.
+- **Serial RX lines** show each received ping: timestamp, nonce, **master MAC** (Mstr aa:bb:cc:dd:ee:ff), mode, RSSI, Mstr Pwr, Path Loss, **TX Pwr** (transponder transmit power set by master). So you can identify which master sent the ping and see transponder power.
 - **Follows master's RF channel** (from payload); sets its channel to match.
 - If no packet for a while, it **cycles RF mode** (STD -> 250k -> 500k) to match the master.
 - Syncs its time from the master.
@@ -152,7 +171,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 
 - **Single board**: Run one as Master (ROLE_PIN to GND) and use Serial to verify commands and status; link tests need a second board as Transponder.
 - **RSSI / path loss**: Vary distance and obstacles; watch FWD Loss, BWD Loss, and Symmetry in Serial.
-- **Plot mode** (`v`): Use for logging into a spreadsheet (e.g. fwd/bwd/symmetry/zeroed).
+- **Plot mode** (`v`): Use for logging into a spreadsheet. Each line is: **channel**, fwdLoss, bwdLoss, symmetry, zeroed (comma-separated).
 - **Power**: Master `p` and remote `t` affect link budget; lower power helps test sensitivity.
 
 ### 6. ESP32 optimisations
@@ -169,7 +188,7 @@ The sketch applies a few RF/radio settings for consistent behaviour:
 
 - **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel 1-14. Both boot on **channel 1** and **standard rate** for quick sync; set channel with **`n`**, switch to LR with **`l`** (session only; reboot = STD again).
 - **Role**: GPIO 13 = GND -> Master; floating/3.3V -> Transponder.
-- **Serial**: 115200, on Master for commands and output.
+- **Serial**: 115200, on Master for commands and output. Incoming lines show the other device’s **MAC address** (master: TX = transponder MAC; transponder: Mstr = master MAC). Press **`h`** for full status (MAC, ESP-NOW mode, etc.).
 
 Once both boards are flashed and roles are set, power them and open the Master's Serial Monitor to test and develop.
 

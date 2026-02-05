@@ -3,12 +3,12 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.0 (Bitrate Selectable, Promiscuous Scan)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.2 (Bitrate Selectable, Promiscuous Scan)
  * ======================================================================================
  * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps
  */
 
-#define FW_VERSION "3.0"
+#define FW_VERSION "3.2"
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -59,6 +59,10 @@ String linkCondition = "STABLE";
 
 // RF channel 1–14. Both devices boot on 1 for quick sync. Master sets via Serial; transponder follows from payload.
 uint8_t wifiChannel = 1;
+// Master: send target channel in payload N times before switching, so transponder can switch first for quicker link re-establishment
+#define PENDING_CHANNEL_PINGS 3
+uint8_t pendingChannel = 0;       // 0 = none; else target channel to switch to after PENDING_CHANNEL_PINGS pings
+uint8_t pendingChannelPingsSent = 0;
 
 // Promiscuous test mode (master only): channel scan for occupancy / noise proxy
 bool promiscuousMode = false;
@@ -289,10 +293,13 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         float zeroed = calibrated ? (mRSSI - referenceRSSI) : 0;
 
         if (!plotMode) {
-            Serial.printf("[%s] N:%u | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f\n", 
-                          getFastTimestamp().c_str(), nonceCounter, fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed);
+            const uint8_t *txMac = info->src_addr;
+            Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f\n",
+                          getFastTimestamp().c_str(), nonceCounter,
+                          txMac[0], txMac[1], txMac[2], txMac[3], txMac[4], txMac[5],
+                          fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed);
         } else {
-            Serial.printf("%.1f,%.1f,%.1f,%.1f\n", fwdLoss, bwdLoss, symmetry, zeroed);
+            Serial.printf("%u,%.1f,%.1f,%.1f,%.1f\n", (unsigned)wifiChannel, fwdLoss, bwdLoss, symmetry, zeroed);
         }
         if (csvFileLogging && csvFile) {
             if (maxRecordingTimeSec > 0 && (millis() - csvLogStartTime) >= (unsigned long)maxRecordingTimeSec * 1000) {
@@ -310,8 +317,11 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         float rssi = (float)info->rx_ctrl->rssi;
         float pathLoss = rxData.txPower - rssi;
         const char* rfModeStr = (currentRFMode == MODE_STD) ? "STD" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
-        if (Serial) Serial.printf("[%s] RX N=%u | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB\n",
-            getFastTimestamp().c_str(), rxData.nonce, rfModeStr, rssi, rxData.txPower, pathLoss);
+        const uint8_t *mstrMac = info->src_addr;
+        if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
+            getFastTimestamp().c_str(), rxData.nonce,
+            mstrMac[0], mstrMac[1], mstrMac[2], mstrMac[3], mstrMac[4], mstrMac[5],
+            rfModeStr, rssi, rxData.txPower, pathLoss, currentPower);
         if (csvFileLogging && csvFile) {
             if (maxRecordingTimeSec > 0 && (millis() - csvLogStartTime) >= (unsigned long)maxRecordingTimeSec * 1000) {
                 csvLogStop();
@@ -326,10 +336,16 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         if (rxData.channel >= 1 && rxData.channel <= 14 && rxData.channel != wifiChannel) {
             wifiChannel = rxData.channel;
             esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
-        }
-        uint32_t newTimeout = (rxData.pingInterval * 3 > 5000) ? (rxData.pingInterval * 3) : 5000;
-        transponderTimeout = newTimeout;
-        if (!esp_now_is_peer_exist(info->src_addr)) {
+            // Update master peer to new channel so esp_now_send succeeds (peer channel must match home channel)
+            if (esp_now_is_peer_exist(info->src_addr)) {
+                esp_now_del_peer(info->src_addr);
+            }
+            esp_now_peer_info_t peerInfo = {};
+            memcpy(peerInfo.peer_addr, info->src_addr, 6);
+            peerInfo.channel = wifiChannel;
+            peerInfo.encrypt = false;
+            esp_now_add_peer(&peerInfo);
+        } else if (!esp_now_is_peer_exist(info->src_addr)) {
             esp_now_peer_info_t peerInfo = {};
             memcpy(peerInfo.peer_addr, info->src_addr, 6);
             peerInfo.channel = wifiChannel;
@@ -357,8 +373,9 @@ void printDetailedStatus() {
     Serial.println("==================================================");
     Serial.printf("  RF PROTOCOL : %s\n", modeStr.c_str());
     Serial.printf("  RF CHANNEL  : %u (1-14)\n", wifiChannel);
-
     if (isMaster) {
+        Serial.printf("  MAC ADDR   : %s\n", WiFi.macAddress().c_str());
+        Serial.printf("  ESP-NOW    : TX: broadcast, RX: unicast\n");
         Serial.printf("  LINK STATUS : %s\n", linkCondition.c_str());
         Serial.printf("  MASTER PWR  : %.1f dBm | REMOTE: %.1f dBm\n", currentPower, remoteTargetPower);
         Serial.printf("  CSV LOG     : %s\n", csvFileLogging ? "ON" : "OFF");
@@ -388,7 +405,9 @@ void printDetailedStatus() {
         Serial.printf("  TIMEOUT   : %u ms (cycle RF mode if no ping)\n", transponderTimeout);
         Serial.printf("  CSV LOG   : %s (master→TX reception)\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX   : %u s (0=no limit)\n", maxRecordingTimeSec);
-        Serial.println("  (RX lines: timestamp | mode | RSSI | path loss)");
+        Serial.printf("  MAC ADDR   : %s\n", WiFi.macAddress().c_str());
+        Serial.printf("  ESP-NOW    : RX: broadcast, TX: unicast\n");
+        Serial.println("  (RX lines: timestamp | N | Mstr MAC | mode | RSSI | Mstr Pwr | Path Loss | TX Pwr)");
         Serial.println("--------------------------------------------------");
         Serial.printf("  [f] CSV file log  : Toggle logging to %s (SPIFFS)\n", CSV_PATH);
         Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
@@ -413,7 +432,7 @@ void setup() {
     if (isMaster) {
         prefs.begin("probe", true); 
         currentRFMode = MODE_STD;   // always boot on standard rate for quick sync (not LR)
-        wifiChannel = prefs.getUChar("wch", 1);
+        // Master always boots on channel 1 (like transponder); channel still saved to NVS when user sets via 'n'
         prefs.end();
         minuteTimer = millis();
     }
@@ -476,10 +495,16 @@ void loop() {
                     case 'm': maxRecordingTimeSec = (uint32_t)val; Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec); break;
                     case 'n': {
                         uint8_t ch = (uint8_t)constrain((int)val, 1, 14);
-                        wifiChannel = ch;
-                        prefs.begin("probe", false); prefs.putUChar("wch", wifiChannel); prefs.end();
-                        applyRFSettings(currentRFMode);
-                        Serial.printf(">> Channel set to %u\n", wifiChannel);
+                        prefs.begin("probe", false); prefs.putUChar("wch", ch); prefs.end();
+                        if (ch == wifiChannel) {
+                            pendingChannel = 0;
+                            pendingChannelPingsSent = 0;
+                            Serial.printf(">> Already on channel %u\n", wifiChannel);
+                        } else {
+                            pendingChannel = ch;
+                            pendingChannelPingsSent = 0;
+                            Serial.printf(">> Switching to channel %u after %u pings (transponder switches first)\n", ch, (unsigned)PENDING_CHANNEL_PINGS);
+                        }
                         break;
                     }
                 }
@@ -498,8 +523,18 @@ void loop() {
             time_t now; time(&now); struct tm ti; localtime_r(&now, &ti);
             myData.nonce = nonceCounter; myData.txPower = currentPower; myData.targetPower = remoteTargetPower;
             myData.pingInterval = burstDelay; myData.hour = ti.tm_hour; myData.minute = ti.tm_min; myData.second = ti.tm_sec;
-            myData.channel = wifiChannel;
+            myData.channel = (pendingChannel != 0) ? pendingChannel : wifiChannel;  // send target channel so transponder can switch first
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
+            if (pendingChannel != 0) {
+                pendingChannelPingsSent++;
+                if (pendingChannelPingsSent >= PENDING_CHANNEL_PINGS) {
+                    wifiChannel = pendingChannel;
+                    pendingChannel = 0;
+                    pendingChannelPingsSent = 0;
+                    applyRFSettings(currentRFMode);
+                    if (!plotMode) Serial.printf(">> Now on channel %u\n", wifiChannel);
+                }
+            }
             digitalWrite(ledPin, HIGH); ledTimer = millis() + 30; currentLEDState = TX_FLASH;
         }
         }
