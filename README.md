@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v2.5)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.0)
 
 ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master.
 
@@ -108,6 +108,10 @@ If you see `[NO REPLY]` with **INTERFERENCE** or **RANGE LIMIT**, check distance
 | `e` | Erase log file for fresh start |
 | `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
 | `n` + number | Set RF channel 1-14, e.g. `n6`; saved to NVS; transponder follows from payload |
+| `P` | **Start promiscuous scan** (master only): sweep channels 1–14 repeatedly; report packet count, avg/min RSSI, busy % per channel |
+| `E` or `e` | **Exit** promiscuous scan; resumes ESP-NOW |
+
+**Promiscuous test mode (master only):** Send **`P`** (uppercase) to stop ESP-NOW and enter WiFi promiscuous mode. The master sweeps channels 1–14, dwelling ~2.1 s per channel, and prints one line per channel: **Ch \| Pkts \| AvgRSSI \| MinRSSI \| Busy%**. It keeps scanning (1→14, then 1→14 again) until you send **`E`** or **`e`** to exit; then ESP-NOW is restored. Use this to see which channels are busy and typical signal levels. Promiscuous mode and ESP-NOW cannot run at the same time, so the link is paused during the scan.
 
 **RF channel:** Both devices **boot on channel 1** and on **ESP-NOW standard rate** (802.11, not Long Range) so they sync quickly. On the **master**, use **`n`** + channel number (e.g. **`n6`**) to set the 2.4 GHz WiFi channel (1-14). Use **`l`** to switch to Long Range (250k/500k) for the session; after reboot both devices are back on standard rate. **For Long Range modes, keep the master sending rate (ping interval, `r`) at least 25 ms.** The channel setting is saved to NVS and sent in each ping. The **transponder** learns the channel in two ways: (1) when it receives a ping, it sets its channel from the payload and stays on it; (2) when it gets **no packet for several consecutive timeouts** (default 3 x timeout), it **cycles through channels 1-14** (and RF modes) to "hunt" for the master. Requiring multiple timeouts avoids cycling on brief fades in marginal conditions--the transponder only hunts when it's clearly lost. So after you change the channel on the master, the transponder will stop receiving, then after 3 timeouts it will cycle until it hits the new channel and locks to it. Use this for channel-specific propagation tests or to avoid busy channels.
 
@@ -159,7 +163,7 @@ Once both boards are flashed and roles are set, power them and open the Master's
 - **Unicast mode with 802.11 PHY statistics** -- Unicast operation with PHY stats (retries, etc.) for link analysis.
 - **MAC address control and display** -- Set and show MAC addresses for peer identification and filtering.
 - **Android-based master controller** -- Master UI/control from an Android device via OTG cable.
-- **Promiscuous mode noise floor test** -- Use promiscuous mode to measure channel noise floor.
+- **Promiscuous test mode (master only)** — Implemented. Serial **`P`** starts a continuous channel scan (1–14, repeats); **`E`** exits and resumes ESP-NOW. Reports packet count, avg/min RSSI, and busy % per channel. Use to pick a quieter channel for ESP-NOW.
 - **RF overload detection** -- Detect when the receiver is overloaded (e.g. antennas too close or insufficient attenuation) and warn or protect the link.
 - **Configurable PHY rate for standard mode** -- Option to set ESP-NOW PHY rate above the default 1 Mbps (e.g. 24M, 54M, or 802.11n MCS rates) for higher throughput at short range, with tradeoff of range/reliability.
 - **Hardware design with rechargeable battery** -- Reference or suggested hardware design for a battery-powered unit with rechargeable battery and charging circuitry.

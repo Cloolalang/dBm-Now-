@@ -3,12 +3,12 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v2.5 (Bitrate Selectable)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.0 (Bitrate Selectable, Promiscuous Scan)
  * ======================================================================================
  * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps
  */
 
-#define FW_VERSION "2.5"
+#define FW_VERSION "3.0"
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -60,6 +60,15 @@ String linkCondition = "STABLE";
 // RF channel 1–14. Both devices boot on 1 for quick sync. Master sets via Serial; transponder follows from payload.
 uint8_t wifiChannel = 1;
 
+// Promiscuous test mode (master only): channel scan for occupancy / noise proxy
+bool promiscuousMode = false;
+uint8_t promScanChannel = 1;
+unsigned long promDwellStart = 0;
+const unsigned long promDwellMs = 2143;  // ~30 s total for 14 channels
+volatile uint32_t promPktCount = 0;
+volatile int32_t promRssiSum = 0;
+volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
+
 // Transponder Specific
 unsigned long lastPacketTime = 0;
 uint32_t transponderTimeout = 5000;
@@ -87,6 +96,10 @@ void csvLogStart();
 void csvLogStop();
 void csvLogDump();
 void csvLogErase();
+void promiscuousRx(void *buf, wifi_promiscuous_pkt_type_t type);
+void promiscuousEnter();
+void promiscuousExit();
+void promiscuousSweepStep();
 
 // --- CORE RF LOGIC ---
 
@@ -195,6 +208,67 @@ void csvLogErase() {
         SPIFFS.remove(CSV_PATH);
         Serial.println(">> CSV file erased.");
     }
+}
+
+// --- PROMISCUOUS TEST MODE (master only) ---
+void promiscuousRx(void *buf, wifi_promiscuous_pkt_type_t type) {
+    if (!buf) return;
+    wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+    int8_t r = pkt->rx_ctrl.rssi;
+    promPktCount++;
+    promRssiSum += r;
+    if (promMinRssi == 0 || r < promMinRssi) promMinRssi = r;
+}
+
+void promiscuousEnter() {
+    if (!isMaster || promiscuousMode) return;
+    esp_now_deinit();
+    promiscuousMode = true;
+    promScanChannel = 1;
+    promPktCount = 0;
+    promRssiSum = 0;
+    promMinRssi = 0;
+    promDwellStart = millis();
+    esp_wifi_set_channel(promScanChannel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous_rx_cb(&promiscuousRx);
+    esp_wifi_set_promiscuous(true);
+    Serial.println(">> Promiscuous scan: channels 1-14, ~2.1s each. Keeps scanning until [E] exit.");
+    Serial.println("   Ch | Pkts | AvgRSSI | MinRSSI | Busy%");
+}
+
+void promiscuousExit() {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    promiscuousMode = false;
+    applyRFSettings(currentRFMode);
+    setPower(currentPower);
+    Serial.println(">> Promiscuous scan done. ESP-NOW resumed.");
+}
+
+void promiscuousSweepStep() {
+    if (!isMaster || !promiscuousMode) return;
+    if (millis() - promDwellStart < promDwellMs) return;
+
+    uint32_t n = promPktCount;
+    float avgRssi = (n > 0) ? (float)promRssiSum / (float)n : 0.0f;
+    int minRssi = promMinRssi;
+    float busyPct = (n > 0) ? (n * 1.0f / (promDwellMs / 1000.0f)) * 0.001f * 100.0f : 0.0f;  // rough: 1 ms per packet
+    if (busyPct > 100.0f) busyPct = 100.0f;
+    if (n > 0)
+        Serial.printf("  %2u  | %4lu | %6.1f | %6d | %5.1f\n", promScanChannel, n, avgRssi, minRssi, busyPct);
+    else
+        Serial.printf("  %2u  |    0 |   --   |   N/A  |  0.0\n", promScanChannel);
+
+    promScanChannel++;
+    if (promScanChannel > 14) {
+        promScanChannel = 1;
+        Serial.println("--- next sweep ---");
+    }
+    esp_wifi_set_channel(promScanChannel, WIFI_SECOND_CHAN_NONE);
+    promPktCount = 0;
+    promRssiSum = 0;
+    promMinRssi = 0;
+    promDwellStart = millis();
 }
 
 void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int len) {
@@ -307,6 +381,7 @@ void printDetailedStatus() {
         Serial.println("  [e] Erase CSV     : Delete log file for fresh start");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
         Serial.println("  [n] Set channel   : RF channel 1-14, e.g. n6 (transponder follows)");
+        Serial.println("  [P] Promiscuous    : Start channel scan (loops 1-14 until [E] exit)");
     } else {
         Serial.printf("  TX PWR    : %.1f dBm (transponder transmit power, set by master)\n", currentPower);
         Serial.printf("  RF CHANNEL: %u (follows master)\n", wifiChannel);
@@ -351,9 +426,13 @@ void setup() {
 }
 
 void loop() {
-    if (millis() - lastStatusPrint >= 10000) { lastStatusPrint = millis(); printDetailedStatus(); }
+    if (!promiscuousMode && millis() - lastStatusPrint >= 10000) { lastStatusPrint = millis(); printDetailedStatus(); }
 
     if (isMaster) {
+        if (promiscuousMode) {
+            promiscuousSweepStep();
+            if (Serial.available() > 0) { char c = Serial.read(); if (c == 'E' || c == 'e') promiscuousExit(); }
+        } else {
         handleLED();
         if (millis() - minuteTimer >= 60000) {
             Serial.printf("\n>>> [MINUTE SUMMARY] Interference: %u | Range Limit: %u <<<\n\n", interfMinCounter, rangeMinCounter);
@@ -366,6 +445,7 @@ void loop() {
             else {
                 float val = Serial.parseFloat();
                 switch (cmd) {
+                    case 'P': promiscuousEnter(); break;
                     case 'l': 
                         currentRFMode = (currentRFMode + 1) % 3;
                         prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end(); 
@@ -421,6 +501,7 @@ void loop() {
             myData.channel = wifiChannel;
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             digitalWrite(ledPin, HIGH); ledTimer = millis() + 30; currentLEDState = TX_FLASH;
+        }
         }
     } else {
         if (Serial.available() > 0) {
