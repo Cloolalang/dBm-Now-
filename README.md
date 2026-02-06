@@ -15,17 +15,41 @@ It can also help explore **2.4 GHz ISM band** channel conditions and **device in
 
 **Comparison with a low-cost VNA (e.g. TinyVNA):** This project is a **link tester** (RSSI, path loss between two devices), not a VNA. The ESP32 probe gives **link performance** at low cost but no S11/S21 or swept response.
 
-The following describes the stack **from the physical layer up to the application**, so the RF channel and radio come first, then how frames are sent, then what is in them.
+---
 
-**ESP-NOW (Espressif protocol):** ESP-NOW is a **connectionless Wi-Fi protocol** defined by Espressif. Data is sent in **vendor-specific action frames** (category 127, OUI 0x18fe34) from one Wi-Fi device to another without connecting to an access point. Two protocol versions exist: **v1.0** (max payload 250 bytes) and **v2.0** (max payload 1470 bytes). v2.0 devices can receive from both; v1.0 devices only from other v1.0 devices (or from v2.0 if the packet is ≤250 bytes). This firmware uses a 25-byte payload, so it is compatible with both. The implementation is part of **ESP-IDF** (and the ESP32 Arduino core); optional encryption uses CCMP with PMK/LMK. Default PHY rate is 1 Mbps; up to 20 peers are supported (6 encrypted by default).
+### Technical summary: ESP-NOW
 
-**PHY (physical layer):** In **standard mode** the radio uses **802.11 b/g/n** in the **2.4 GHz ISM band**: **DSSS** (1-11 Mbps) for 11b, **OFDM** for 11g/n. Channel **bandwidth** is **20 MHz** (no secondary channel). Default ESP-NOW PHY rate is **1 Mbps**; higher rates are possible but not configured in this sketch. In **Long Range mode** the radio uses Espressif's **LR modulation** (250 kbps or 500 kbps), with longer symbol times and better sensitivity at the cost of throughput.
+**What it is:** ESP-NOW is a **connectionless, peer-to-peer Wi‑Fi protocol** defined by Espressif. Devices send and receive short frames **without joining an access point (AP)** or maintaining a TCP/IP stack. It is aimed at low-latency, low-overhead links (sensors, remotes, device-to-device control).
 
-**On-air time (approximate):** At **1 Mbps** (standard mode), air time ≈ (PLCP preamble + PLCP header + MAC header + payload + FCS) in bits ÷ 1 Mbps. With 802.11b short preamble (~120 µs) and ~52 bytes of MAC + 25-byte payload + FCS (~416 bits at 1 Mbps), total is about **0.5–0.6 ms** per packet. At **Long Range 250 kbps**, the payload alone is 192 bits ÷ 250 kbps ≈ **0.77 ms**; with preamble and headers (structure is chip-dependent), total is typically on the order of **1–2 ms** per packet. At **500 kbps** LR, payload air time is about half that.
+**Frame format:** User data is carried in **802.11 management frames**: vendor-specific **action frames** (category 127, OUI **0x18fe34**). The payload is opaque to standard Wi‑Fi gear; other stations see management/vendor traffic and may defer (CSMA/CA) but do not decode the content.
+
+**Protocol versions:**
+- **v1.0:** Max payload **250 bytes**. Only interoperates with other v1.0 devices (or v2.0 when packet ≤ 250 bytes).
+- **v2.0:** Max payload **1470 bytes**. Can receive from both v1.0 and v2.0 senders.
+
+**PHY and band:** Operates in the **2.4 GHz ISM band** on a single **20 MHz** channel (1–14). Standard mode uses **802.11 b/g/n** (DSSS for 11b, OFDM for 11g/n); default PHY rate is **1 Mbps**. Optional **Long Range (LR)** mode uses Espressif’s proprietary LR modulation (e.g. 250 or 500 kbps) for better sensitivity and range at lower throughput.
+
+**On-air time (basic ESP-NOW packet):** At **1 Mbps** (standard mode), a typical frame is PLCP preamble (~120 µs for 802.11b short) + PLCP header + 802.11/ESP-NOW MAC and headers (~52 bytes) + payload + FCS. For a **25-byte payload**, total air time is about **0.5–0.6 ms** per packet; for a 250-byte payload, roughly **2–2.5 ms**. In **unicast**, the receiver sends an 802.11 ACK (~30 µs at 1 Mbps), so total transaction is packet + ACK. **Long Range 250 kbps** has longer symbol times; a 25-byte payload is on the order of **1–2 ms** on air (chip-dependent preamble/header).
+
+**Peers and addressing:** Up to **20 peers** per device (e.g. 6 with encryption enabled by default in ESP-IDF). Frames can be sent **unicast** (to a peer MAC) or **broadcast** (e.g. FF:FF:FF:FF:FF:FF). **Unicast** typically uses **802.11 link-layer ACK** (receiver sends an ACK frame); **broadcast** has no link-layer ACK. Applications can add their own request/response or retries.
+
+**802.11 retries (unicast):** When a unicast frame is not ACKed, the 802.11 MAC **retransmits** it: the sender waits **DIFS** (DCF inter-frame spacing), then a **random backoff** (slot time × random value in the contention window), and sends again. The contention window typically **increases** (e.g. doubles) up to a maximum on each retry to reduce collisions under load. The number of retries is **limited** (e.g. 4 or 7 attempts, implementation-dependent); after that the frame is discarded and the upper layer may be notified. **Broadcast** frames are not retried at the link layer.
+
+**Security:** Optional **encryption** using **CCMP** with a Primary Master Key (PMK) and per-peer Local Master Keys (LMK). If disabled, all payloads are sent in the clear.
+
+**Stack and API:** Implemented in **ESP-IDF** and exposed in the **ESP32 Arduino core**. The Wi‑Fi interface must be initialised (STA or AP) but does not need to be connected to an AP; ESP-NOW runs alongside Wi‑Fi and shares the same radio and channel.
+
+**Coexistence:** Because the PHY is standard 802.11, ESP-NOW traffic is **visible to other Wi‑Fi devices** as channel activity (carrier sense). It does not use IP; it does not appear as normal Wi‑Fi data traffic to routers or phones. Suitable for dedicated links, test setups, or low-rate telemetry in the 2.4 GHz band.
+
+---
+
+The following describes **this firmware’s** usage of the stack: payload, link behaviour, and measurement details.
+
+**This firmware:** Uses a **25-byte** payload (compatible with ESP-NOW v1.0 and v2.0). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
 
 **RSSI dynamic range:** The reportable RSSI range is roughly **-100 dBm to -30 dBm** (weaker to stronger); **-127** (or sometimes 0) means no signal / invalid. Receiver sensitivity (minimum usable signal) depends on mode: **Long Range 250 kbps** is best (often about -100 to -105 dBm), then **standard 1 Mbps** (about -98 dBm), then LR 500k, then higher 802.11 rates. Usable dynamic range is about **70–75 dB** (sensitivity to saturation). Exact values are chip/board dependent; strong signals can saturate near the upper end. **Expected measurement standard deviation:** In stable conditions (fixed geometry, little multipath), RSSI repeatability is often on the order of **1–3 dB** (σ). With movement, multipath, or changing environment, standard deviation can be **several dB** (e.g. 3–6 dB or more). Averaging over multiple pings or using metal enclosures and fixed antenna positions reduces observed variance.
 
-**MAC / protocol:** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** -- if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 0-49 ms random jitter on each ping interval to avoid accidentally syncing with WiFi beacons (e.g. 100 ms / 102.4 ms TU). ESP-NOW uses a **management frame format** (vendor-specific); other WiFi devices (phones, laptops, routers) cannot decode ESP-NOW traffic directly -- they may see it as management or vendor traffic but will not interpret the payload. Because the **PHY is standard 802.11**, local WiFi devices **do see ESP-NOW transmissions for carrier-sense / collision avoidance (CSMA/CA)**: the channel appears busy during an ESP-NOW packet, so other stations defer and avoid colliding with it. The **ESP-NOW transmitter itself uses 802.11 CSMA/CA** (listen before talk, backoff if busy) via the WiFi MAC before each send.
+**MAC / protocol (this firmware):** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 0–49 ms random jitter on each ping interval to avoid syncing with WiFi beacons.
 
 **Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (25 bytes). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
 
@@ -40,9 +64,7 @@ The following describes the stack **from the physical layer up to the applicatio
 | `channel` | uint8_t | RF channel 1–14: current channel, or **target channel** during a channel change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF channel |
 | `rfMode` | uint8_t | 0=STD, 1=LR 250k, 2=LR 500k: current mode, or **target mode** during an RF mode change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF mode |
 
-On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), and rfMode (current or pending target). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; and fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry).
-
-**Encryption:** ESP-NOW is used **without encryption** in this firmware (`peerInfo.encrypt = false`). All payloads are sent in the clear. Do not use for sensitive data.
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), and rfMode (current or pending target). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; and fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry). All payloads are sent in the clear; do not use for sensitive data.
 
 ---
 
