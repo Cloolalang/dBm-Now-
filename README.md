@@ -208,10 +208,10 @@ Once both boards are flashed and roles are set, power them and open the Master's
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
-- **Unicast mode with 802.11 PHY statistics** -- Unicast operation with PHY stats (retries, etc.) for link analysis.
-- **MAC address control and display** -- Set and show MAC addresses for peer identification and filtering.
+- **Unicast mode with 802.11 PHY statistics** -- Unicast operation with PHY stats (retries, etc.) for link analysis; support for operating multiple transponders.
+- **RF test examples** -- Examples described in the README (e.g. path loss, symmetry, channel sweep), including a one-port test using a directional coupler.
+- **Save Promiscuous mode results to .csv** -- Option to save promiscuous scan measurements (channel, packet count, avg/min RSSI, busy %) to a .csv file.
 - **Android-based master controller** -- Master UI/control from an Android device via OTG cable.
-- **Promiscuous test mode (master only)** — Implemented. Serial **`P`** starts a continuous channel scan (1–14, repeats); **`E`** exits and resumes ESP-NOW. Reports packet count, avg/min RSSI, and busy % per channel. Use to pick a quieter channel for ESP-NOW.
 - **RF overload detection** -- Detect when the receiver is overloaded (e.g. antennas too close or insufficient attenuation) and warn or protect the link.
 - **Configurable PHY rate for standard mode** -- Option to set ESP-NOW PHY rate above the default 1 Mbps (e.g. 24M, 54M, or 802.11n MCS rates) for higher throughput at short range, with tradeoff of range/reliability.
 - **Hardware design with rechargeable battery** -- Reference or suggested hardware design for a battery-powered unit with rechargeable battery and charging circuitry.
