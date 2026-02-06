@@ -21,6 +21,14 @@
 #include <time.h>
 #include <sys/time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+uint8_t temprature_sens_read(void);  // ESP32 internal temp (raw); 128 = invalid. Convert: (raw - 32) / 1.8 = °C
+#ifdef __cplusplus
+}
+#endif
+
 // --- HARDWARE ROLE CONFIG ---
 const int ROLE_PIN = 13;
 bool isMaster = false;
@@ -52,6 +60,12 @@ bool csvFileLogging = false;
 File csvFile;
 uint32_t maxRecordingTimeSec = 0;   // 0 = no limit; auto-stop after this many seconds
 unsigned long csvLogStartTime = 0;   // set when logging starts 
+
+// Rolling missed-packets (master: last N pongs)
+#define MISSED_HISTORY_LEN 10
+uint8_t missedHistory[MISSED_HISTORY_LEN];
+uint8_t missedHistoryIdx = 0;
+uint8_t missedHistoryCount = 0;   // 0..MISSED_HISTORY_LEN
 
 // Rolling Minute Counters
 float lastKnownRSSI = -100.0;
@@ -169,6 +183,20 @@ String getFastTimestamp() {
     return String(buf);
 }
 
+/* Internal chip temperature °C (original ESP32). Returns -999.0f if invalid/unsupported. */
+float getChipTempC(void) {
+    uint8_t raw = temprature_sens_read();
+    if (raw == 128) return -999.0f;  /* invalid on ESP32 */
+    return ((float)((int)raw - 32)) / 1.8f;
+}
+
+/* Current effective max TX power in dBm (0.25 dBm units from PHY). Returns -999.0f if get fails. Used to detect thermal throttling. */
+float getActualMaxTxPowerDbm(void) {
+    int8_t power_quarter_dbm = 0;
+    if (esp_wifi_get_max_tx_power(&power_quarter_dbm) != ESP_OK) return -999.0f;
+    return (float)power_quarter_dbm * 0.25f;
+}
+
 void setESP32Time(int hr, int min) {
     struct tm tm = {0}; tm.tm_year = 2026 - 1900; tm.tm_mon = 0; tm.tm_mday = 1;
     tm.tm_hour = hr; tm.tm_min = min; tm.tm_sec = 0;
@@ -198,7 +226,7 @@ void csvLogStart() {
     }
     if (csvFile.size() == 0) {
         if (isMaster)
-            csvFile.println("timestamp,nonce,fwdLoss,bwdLoss,symmetry,zeroed,masterRSSI,remoteRSSI");
+            csvFile.println("timestamp,nonce,fwdLoss,bwdLoss,symmetry,zeroed,masterRSSI,remoteRSSI,linkPct,lavg,chipTempC");
         else
             csvFile.println("timestamp,nonce,rfMode,rssi,masterPwr,pathLoss,transponderPwr");
     }
@@ -319,22 +347,47 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         if (pong.missedCount > 0 && !plotMode)
             Serial.printf(">> Transponder missed %u packet(s) (nonce(s) %u-%u)\n",
                 (unsigned)pong.missedCount, (unsigned)(pong.nonce - pong.missedCount), (unsigned)(pong.nonce - 1));
+        // Rolling missed: last MISSED_HISTORY_LEN pongs
+        missedHistory[missedHistoryIdx] = pong.missedCount;
+        missedHistoryIdx = (missedHistoryIdx + 1) % MISSED_HISTORY_LEN;
+        if (missedHistoryCount < MISSED_HISTORY_LEN) missedHistoryCount++;
+        uint8_t n = missedHistoryCount;
+        uint32_t sumMissed = 0;
+        uint8_t countWithLoss = 0;
+        for (uint8_t i = 0; i < n; i++) {
+            uint8_t j = (n == MISSED_HISTORY_LEN) ? (uint8_t)((missedHistoryIdx + i) % MISSED_HISTORY_LEN) : i;
+            sumMissed += missedHistory[j];
+            if (missedHistory[j] > 0) countWithLoss++;
+        }
+        uint8_t linkPct = (n > 0) ? (uint8_t)(100u - (countWithLoss * 100u) / (uint32_t)n) : 100;  // 100% = no missed pings
+        float avgMissed = (n > 0) ? (float)sumMissed / (float)n : 0.0f;
         if (!plotMode) {
             const uint8_t *txMac = info->src_addr;
-            Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f\n",
-                          getFastTimestamp().c_str(), nonceCounter,
-                          txMac[0], txMac[1], txMac[2], txMac[3], txMac[4], txMac[5],
-                          fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed);
+            float chipTemp = getChipTempC();
+            if (chipTemp > -100.0f)
+                Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:%.1f C | Link%%:%u Lavg:%.1f\n",
+                              getFastTimestamp().c_str(), nonceCounter,
+                              txMac[0], txMac[1], txMac[2], txMac[3], txMac[4], txMac[5],
+                              fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed, chipTemp, linkPct, avgMissed);
+            else
+                Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:N/A | Link%%:%u Lavg:%.1f\n",
+                              getFastTimestamp().c_str(), nonceCounter,
+                              txMac[0], txMac[1], txMac[2], txMac[3], txMac[4], txMac[5],
+                              fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed, linkPct, avgMissed);
+            float actualMax = getActualMaxTxPowerDbm();
+            if (actualMax > -100.0f && actualMax < currentPower - 1.0f)
+                Serial.printf(">> Thermal throttling: TX power reduced to %.1f dBm (requested %.1f dBm)\n", actualMax, currentPower);
         } else {
-            Serial.printf("%u,%.1f,%.1f,%.1f,%.1f\n", (unsigned)wifiChannel, fwdLoss, bwdLoss, symmetry, zeroed);
+            Serial.printf("%u,%.1f,%.1f,%.1f,%.1f,%u,%.1f\n", (unsigned)wifiChannel, fwdLoss, bwdLoss, symmetry, zeroed, linkPct, avgMissed);
         }
         if (csvFileLogging && csvFile) {
             if (maxRecordingTimeSec > 0 && (millis() - csvLogStartTime) >= (unsigned long)maxRecordingTimeSec * 1000) {
                 csvLogStop();
                 Serial.println(">> CSV logging stopped (max time reached).");
             } else {
-                csvFile.printf("%s,%u,%.1f,%.1f,%.1f,%.1f,%.0f,%.0f\n",
-                    getFastTimestamp().c_str(), nonceCounter, fwdLoss, bwdLoss, symmetry, zeroed, mRSSI, tRSSI);
+                float chipTemp = getChipTempC();
+                csvFile.printf("%s,%u,%.1f,%.1f,%.1f,%.1f,%.0f,%.0f,%u,%.1f,%.1f\n",
+                    getFastTimestamp().c_str(), nonceCounter, fwdLoss, bwdLoss, symmetry, zeroed, mRSSI, tRSSI, linkPct, avgMissed, chipTemp);
                 csvFile.flush();
             }
         }
@@ -427,6 +480,8 @@ void printDetailedStatus() {
         Serial.printf("  ESP-NOW    : TX: broadcast, RX: unicast\n");
         Serial.printf("  LINK STATUS : %s\n", linkCondition.c_str());
         Serial.printf("  MASTER PWR  : %.1f dBm | REMOTE: %.1f dBm\n", currentPower, remoteTargetPower);
+        { float t = getChipTempC(); if (t > -100.0f) Serial.printf("  CHIP TEMP   : %.1f C\n", t); else Serial.println("  CHIP TEMP   : N/A"); }
+        { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL     : Throttled (actual %.1f dBm, requested %.1f dBm)\n", a, currentPower); else Serial.println("  THERMAL     : OK"); }
         Serial.printf("  CSV LOG     : %s\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX    : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.println("--------------------------------------------------");
@@ -450,6 +505,7 @@ void printDetailedStatus() {
         Serial.println("  [P] Promiscuous    : Start channel scan (loops 1-14 until [E] exit)");
     } else {
         Serial.printf("  TX PWR    : %.1f dBm (transponder transmit power, set by master)\n", currentPower);
+        { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL   : Throttled (actual %.1f dBm)\n", a); else Serial.println("  THERMAL   : OK"); }
         Serial.printf("  RF CHANNEL: %u (follows master)\n", wifiChannel);
         Serial.printf("  TIMEOUT   : %u ms (cycle RF mode if no ping)\n", transponderTimeout);
         Serial.printf("  CSV LOG   : %s (master→TX reception)\n", csvFileLogging ? "ON" : "OFF");
