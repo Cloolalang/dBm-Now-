@@ -3,12 +3,12 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.3 (Bitrate Selectable, Promiscuous Scan)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.5 (Serial validation, Promiscuous Scan)
  * ======================================================================================
  * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps
  */
 
-#define FW_VERSION "3.3"
+#define FW_VERSION "3.5"
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -73,6 +73,14 @@ bool promiscuousMode = false;
 uint8_t promScanChannel = 1;
 unsigned long promDwellStart = 0;
 const unsigned long promDwellMs = 2143;  // ~30 s total for 14 channels
+
+// Serial command value limits (validation)
+#define TX_POWER_MIN (-1.0f)
+#define TX_POWER_MAX 20.0f
+#define PING_INTERVAL_MIN_MS 10u
+#define PING_INTERVAL_MIN_LR_MS 25u
+#define PING_INTERVAL_MAX_MS 86400000u   // 24 h
+#define MAX_RECORD_TIME_SEC 31536000u    // 1 year
 volatile uint32_t promPktCount = 0;
 volatile int32_t promRssiSum = 0;
 volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
@@ -81,7 +89,8 @@ volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
 unsigned long lastPacketTime = 0;
 uint32_t transponderTimeout = 5000;
 #define TRANSPONDER_CYCLE_AFTER_TIMEOUTS 3   // require this many consecutive timeouts before hunting (avoids cycling on brief fades)
-uint32_t transponderConsecutiveTimeouts = 0; 
+uint32_t transponderConsecutiveTimeouts = 0;
+uint32_t lastReceivedNonce = 0;   // for gap detection: transponder reports missed packets when nonce is not consecutive 
 
 enum LEDState { IDLE, TX_FLASH, GAP, RX_FLASH };
 LEDState currentLEDState = IDLE;
@@ -95,6 +104,7 @@ typedef struct {
     uint8_t hour; uint8_t minute; uint8_t second;
     uint8_t channel;  // RF channel 1–14
     uint8_t rfMode;   // 0=STD, 1=LR 250k, 2=LR 500k
+    uint8_t missedCount;  // transponder: number of packets missed before this nonce (gap in sequence)
 } Payload;
 Payload myData, txData, rxData;
 
@@ -161,11 +171,13 @@ void setESP32Time(int hr, int min) {
 }
 
 void setPower(float pwr) {
-    if (pwr == currentPower) return;
-    currentPower = pwr;
-    int8_t pwr_val = (pwr >= 19.5) ? 78 : (pwr >= 11 ? 44 : 8);
+    float clamped = (pwr < TX_POWER_MIN) ? TX_POWER_MIN : (pwr > TX_POWER_MAX) ? TX_POWER_MAX : pwr;
+    if (clamped != pwr && Serial && !plotMode) Serial.printf(">> TX power clamped to %.0f dBm (valid %.0f–%.0f)\n", clamped, TX_POWER_MIN, TX_POWER_MAX);
+    if (clamped == currentPower) return;
+    currentPower = clamped;
+    int8_t pwr_val = (clamped >= 19.5) ? 78 : (clamped >= 11 ? 44 : 8);
     esp_wifi_set_max_tx_power(pwr_val);
-    delay(20); 
+    delay(20);
 }
 
 void csvLogStart() {
@@ -281,10 +293,12 @@ void promiscuousSweepStep() {
 }
 
 void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int len) {
-    if (len < (int)sizeof(Payload)) return;
+    if (len < (int)sizeof(Payload) - 1) return;   // accept old 25-byte payload (no missedCount)
     lastPacketTime = millis();
     if (isMaster) {
-        Payload pong; memcpy(&pong, incoming, sizeof(pong));
+        Payload pong;
+        memcpy(&pong, incoming, len >= (int)sizeof(Payload) ? sizeof(pong) : (size_t)len);
+        if (len < (int)sizeof(Payload)) pong.missedCount = 0;
         waitingForPong = false; pendingRX = true; 
         lastKnownRSSI = (float)info->rx_ctrl->rssi;
         linkCondition = "STABLE"; 
@@ -297,6 +311,9 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         if (!calibrated && referenceRSSI == 1.0f) { referenceRSSI = mRSSI; calibrated = true; }
         float zeroed = calibrated ? (mRSSI - referenceRSSI) : 0;
 
+        if (pong.missedCount > 0 && !plotMode)
+            Serial.printf(">> Transponder missed %u packet(s) (nonce(s) %u-%u)\n",
+                (unsigned)pong.missedCount, (unsigned)(pong.nonce - pong.missedCount), (unsigned)(pong.nonce - 1));
         if (!plotMode) {
             const uint8_t *txMac = info->src_addr;
             Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f\n",
@@ -318,7 +335,23 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         }
     } else {
         transponderConsecutiveTimeouts = 0;   // any received packet resets "lost" count
-        memcpy(&rxData, incoming, sizeof(rxData));
+        if (len >= (int)sizeof(rxData))
+            memcpy(&rxData, incoming, sizeof(rxData));
+        else {
+            memcpy(&rxData, incoming, (size_t)len);
+            rxData.missedCount = 0;   // old 25-byte payload
+        }
+        uint8_t missedCount = 0;
+        if (lastReceivedNonce != 0 && rxData.nonce > lastReceivedNonce) {
+            uint32_t gap = rxData.nonce - lastReceivedNonce - 1;
+            if (gap <= 255) {
+                missedCount = (uint8_t)gap;
+                if (Serial) Serial.printf(">> Missed packet(s): nonce(s) %u-%u (gap %u)\n",
+                    (unsigned)(lastReceivedNonce + 1), (unsigned)(rxData.nonce - 1), (unsigned)missedCount);
+            }
+        }
+        lastReceivedNonce = rxData.nonce;
+
         float rssi = (float)info->rx_ctrl->rssi;
         float pathLoss = rxData.txPower - rssi;
         const char* rfModeStr = (currentRFMode == MODE_STD) ? "STD" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
@@ -363,6 +396,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         }
         setPower(rxData.targetPower);
         txData.nonce = rxData.nonce;
+        txData.missedCount = missedCount;
         txData.txPower = currentPower;
         txData.channel = wifiChannel;
         txData.rfMode = currentRFMode;
@@ -470,7 +504,15 @@ void loop() {
 
         if (Serial.available() > 0) {
             char cmd = Serial.read();
-            if (cmd == 'k') { int val = Serial.parseInt(); setESP32Time(val / 100, val % 100); }
+            if (cmd == 'k') {
+                int val = Serial.parseInt();
+                int hh = val / 100, mm = val % 100;
+                if (val < 0 || val > 2359 || hh > 23 || mm > 59) {
+                    if (Serial && !plotMode) Serial.println(">> Invalid time (use HHMM 0000–2359)");
+                } else {
+                    setESP32Time(hh, mm);
+                }
+            }
             else {
                 float val = Serial.parseFloat();
                 switch (cmd) {
@@ -490,9 +532,20 @@ void loop() {
                         delay(100); ESP.restart(); 
                         break;
                     case 'p': setPower(val); break;
-                    case 't': remoteTargetPower = val; break;
+                    case 't': {
+                        float tClamp = (val < TX_POWER_MIN) ? TX_POWER_MIN : (val > TX_POWER_MAX) ? TX_POWER_MAX : val;
+                        if (tClamp != val && Serial && !plotMode) Serial.printf(">> Remote target power clamped to %.0f dBm (valid %.0f–%.0f)\n", tClamp, TX_POWER_MIN, TX_POWER_MAX);
+                        remoteTargetPower = tClamp;
+                        break;
+                    }
                     case 'v': plotMode = !plotMode; break;
-                    case 'r': burstDelay = (uint32_t)val; break;
+                    case 'r': {
+                        uint32_t minMs = (currentRFMode != MODE_STD) ? PING_INTERVAL_MIN_LR_MS : PING_INTERVAL_MIN_MS;
+                        uint32_t v = (val <= 0) ? minMs : (val < minMs) ? minMs : (val > PING_INTERVAL_MAX_MS) ? PING_INTERVAL_MAX_MS : (uint32_t)val;
+                        if ((val <= 0 || val < minMs || val > PING_INTERVAL_MAX_MS) && Serial && !plotMode) Serial.printf(">> Ping interval clamped to %u ms (LR min %u, max %u)\n", v, (unsigned)PING_INTERVAL_MIN_LR_MS, (unsigned)PING_INTERVAL_MAX_MS);
+                        burstDelay = v;
+                        break;
+                    }
                     case 'h': printDetailedStatus(); break;
                     case 's': remoteTargetPower = currentPower; break;
                     case 'c': interfMinCounter = 0; rangeMinCounter = 0; Serial.println(">> Stats Reset."); break;
@@ -516,7 +569,13 @@ void loop() {
                     case 'f': if (csvFileLogging) csvLogStop(); else csvLogStart(); break;
                     case 'd': csvLogDump(); break;
                     case 'e': csvLogErase(); break;
-                    case 'm': maxRecordingTimeSec = (uint32_t)val; Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec); break;
+                    case 'm': {
+                        uint32_t mVal = (uint32_t)(val < 0 ? 0 : (val > MAX_RECORD_TIME_SEC ? MAX_RECORD_TIME_SEC : val));
+                        if ((val < 0 || val > MAX_RECORD_TIME_SEC) && Serial && !plotMode) Serial.printf(">> Max record time clamped to 0–%u s\n", (unsigned)MAX_RECORD_TIME_SEC);
+                        maxRecordingTimeSec = mVal;
+                        if (Serial && !plotMode) Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec);
+                        break;
+                    }
                     case 'n': {
                         uint8_t ch = (uint8_t)constrain((int)val, 1, 14);
                         prefs.begin("probe", false); prefs.putUChar("wch", ch); prefs.end();
@@ -550,6 +609,7 @@ void loop() {
             myData.pingInterval = burstDelay; myData.hour = ti.tm_hour; myData.minute = ti.tm_min; myData.second = ti.tm_sec;
             myData.channel = (pendingChannel != 0) ? pendingChannel : wifiChannel;  // send target channel so transponder can switch first
             myData.rfMode = (pendingRFMode <= 2) ? pendingRFMode : currentRFMode;   // send target RF mode so transponder can switch first
+            myData.missedCount = 0;   // master does not use; transponder echoes gap count in pong
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;
@@ -579,7 +639,10 @@ void loop() {
         if (Serial.available() > 0) {
             char cmd = Serial.read();
             if (cmd == 'm') {
-                maxRecordingTimeSec = (uint32_t)Serial.parseInt();
+                long raw = Serial.parseInt();
+                long mVal = (raw < 0) ? 0 : (raw > (long)MAX_RECORD_TIME_SEC) ? (long)MAX_RECORD_TIME_SEC : raw;
+                if (mVal != raw && Serial) Serial.printf(">> Max record time clamped to 0–%u s\n", (unsigned)MAX_RECORD_TIME_SEC);
+                maxRecordingTimeSec = (uint32_t)mVal;
                 if (Serial) Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec);
             } else
             switch (cmd) {

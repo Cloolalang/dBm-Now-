@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.3)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.5)
 
 ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master.
 
@@ -21,7 +21,7 @@ It can also help explore **2.4 GHz ISM band** channel conditions and **device in
 
 **What it is:** ESP-NOW is a **connectionless, peer-to-peer Wi‑Fi protocol** defined by Espressif. Devices send and receive short frames **without joining an access point (AP)** or maintaining a TCP/IP stack. It is aimed at low-latency, low-overhead links (sensors, remotes, device-to-device control).
 
-**Frame format:** User data is carried in **802.11 management frames**: vendor-specific **action frames** (category 127, OUI **0x18fe34**). The payload is opaque to standard Wi‑Fi gear; other stations see management/vendor traffic and may defer (CSMA/CA) but do not decode the content.
+**Frame format:** User data is carried in **802.11 management frames**: vendor-specific **action frames** (category 127, OUI **0x18fe34**). The payload is opaque to standard Wi‑Fi gear; other stations see management/vendor traffic and may defer (CSMA/CA) but do not decode the content. Every 802.11 frame includes a **FCS (Frame Check Sequence)** at the end; the receiver validates the FCS and **discards** the frame if it fails (no payload is passed up). In **unicast**, a failed FCS means no ACK is sent, so the sender retries. ESP-NOW does not add its own FEC or ARQ — error handling is detection (FCS) plus 802.11 retransmission for unicast only. **On the ESP32**, the receive path exposes FCS-related info in **`wifi_pkt_rx_ctrl_t`** (the `rx_ctrl` in the ESP-NOW receive callback and in promiscuous RX): **`sig_len`** is the packet length including the FCS (4 bytes); **`rx_state`** is 0 when the frame passed (no error, FCS OK) and non-zero on error (error codes are not public, but typically include CRC/FCS failure). So you can infer FCS pass/fail from `rx_state` in application code.
 
 **Protocol versions:**
 - **v1.0:** Max payload **250 bytes**. Only interoperates with other v1.0 devices (or v2.0 when packet ≤ 250 bytes).
@@ -45,13 +45,13 @@ It can also help explore **2.4 GHz ISM band** channel conditions and **device in
 
 The following describes **this firmware’s** usage of the stack: payload, link behaviour, and measurement details.
 
-**This firmware:** Uses a **25-byte** payload (compatible with ESP-NOW v1.0 and v2.0). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
+**This firmware:** Uses a **26-byte** payload (compatible with ESP-NOW v1.0 and v2.0). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
 
 **RSSI dynamic range:** The reportable RSSI range is roughly **-100 dBm to -30 dBm** (weaker to stronger); **-127** (or sometimes 0) means no signal / invalid. Receiver sensitivity (minimum usable signal) depends on mode: **Long Range 250 kbps** is best (often about -100 to -105 dBm), then **standard 1 Mbps** (about -98 dBm), then LR 500k, then higher 802.11 rates. Usable dynamic range is about **70–75 dB** (sensitivity to saturation). Exact values are chip/board dependent; strong signals can saturate near the upper end. **Expected measurement standard deviation:** In stable conditions (fixed geometry, little multipath), RSSI repeatability is often on the order of **1–3 dB** (σ). With movement, multipath, or changing environment, standard deviation can be **several dB** (e.g. 3–6 dB or more). Averaging over multiple pings or using metal enclosures and fixed antenna positions reduces observed variance.
 
 **MAC / protocol (this firmware):** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 0–49 ms random jitter on each ping interval to avoid syncing with WiFi beacons.
 
-**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (25 bytes). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
+**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (26 bytes). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
 
 | Field | Type | Ping (master sends) | Pong (transponder sends) |
 |-------|------|---------------------|--------------------------|
@@ -63,8 +63,9 @@ The following describes **this firmware’s** usage of the stack: payload, link 
 | `hour`, `minute`, `second` | uint8_t | Master RTC time | Echo of received time (transponder syncs its clock) |
 | `channel` | uint8_t | RF channel 1–14: current channel, or **target channel** during a channel change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF channel |
 | `rfMode` | uint8_t | 0=STD, 1=LR 250k, 2=LR 500k: current mode, or **target mode** during an RF mode change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF mode |
+| `missedCount` | uint8_t | 0 (not used) | Number of packets the transponder missed before this nonce (gap in sequence); 0 = none |
 
-On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), and rfMode (current or pending target). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; and fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry). All payloads are sent in the clear; do not use for sensitive data.
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), and rfMode (current or pending target). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap; the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
 
 ---
 
@@ -155,11 +156,11 @@ If you see `[NO REPLY]` with **INTERFERENCE** (last RSSI was high → likely col
 | Key | Action |
 |-----|--------|
 | `l` | Cycle RF mode: STD (802.11) -> 250k -> 500k; master sends new mode in payload for 3 pings before switching (transponder switches first, no restart) |
-| `p` + number | Set master TX power (dBm), e.g. `p14` |
-| `t` + number | Set remote (transponder) target power (dBm), e.g. `t8` |
+| `p` + number | Set master TX power (dBm), e.g. `p14`. **Valid range:** -1 to +20 dBm (typical ESP32; board-dependent). This firmware maps to discrete steps. |
+| `t` + number | Set remote (transponder) target power (dBm), e.g. `t8`. **Valid range:** same as master (-1 to +20 dBm). |
 | `s` | Set remote target power = current master power |
 | `v` | Toggle plot mode (CSV-style output: channel, fwdLoss, bwdLoss, symmetry, zeroed) |
-| `r` + number | Set ping interval (ms), e.g. `r500` |
+| `r` + number | Set ping interval (ms), e.g. `r500`. **Valid range:** Long Range mode **min 25 ms** (recommended); **max** not enforced by firmware (e.g. 100–86400000 ms). |
 | `h` | Print detailed status |
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |
 | `z` | Zero cal: set reference from last RSSI so **Z** = delta from that point (or on next pong if none yet) |
@@ -232,6 +233,8 @@ Once both boards are flashed and roles are set, power them and open the Master's
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
 - **Unicast mode with 802.11 PHY statistics** -- Unicast operation with PHY stats (retries, etc.) for link analysis; support for operating multiple transponders.
 - **RF test examples** -- Examples described in the README (e.g. path loss, symmetry, channel sweep), including a one-port test using a directional coupler.
+- **Max payload mode** -- Master and transponder fill all free space in the packet so each packet is maximum size (e.g. for throughput or air-time testing).
+- **Firmware version check** -- Check that master and transponder are running the same firmware version and alert the master (e.g. via payload or status) when they differ.
 - **Save Promiscuous mode results to .csv** -- Option to save promiscuous scan measurements (channel, packet count, avg/min RSSI, busy %) to a .csv file.
 - **Android-based master controller** -- Master UI/control from an Android device via OTG cable.
 - **RF overload detection** -- Detect when the receiver is overloaded (e.g. antennas too close or insufficient attenuation) and warn or protect the link.
