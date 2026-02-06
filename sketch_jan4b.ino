@@ -5,10 +5,12 @@
  * ======================================================================================
  * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.5 (Serial validation, Promiscuous Scan)
  * ======================================================================================
- * [l] Toggle Mode : STD -> LR 250kbps -> LR 500kbps
  */
 
 #define FW_VERSION "3.5"
+// Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
+// Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
+#define SERIAL_BAUD 921600
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -81,6 +83,9 @@ const unsigned long promDwellMs = 2143;  // ~30 s total for 14 channels
 #define PING_INTERVAL_MIN_LR_MS 25u
 #define PING_INTERVAL_MAX_MS 86400000u   // 24 h
 #define MAX_RECORD_TIME_SEC 31536000u    // 1 year
+// Jitter: prime ms values 1–17 to avoid periodic alignment with WiFi beacons (e.g. 100 ms TU)
+static const uint8_t JITTER_PRIME_MS[] = {1, 2, 3, 5, 7, 11, 13, 17};
+#define JITTER_PRIME_COUNT (sizeof(JITTER_PRIME_MS) / sizeof(JITTER_PRIME_MS[0]))
 volatile uint32_t promPktCount = 0;
 volatile int32_t promRssiSum = 0;
 volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
@@ -463,7 +468,7 @@ void printDetailedStatus() {
 }
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(SERIAL_BAUD);
     pinMode(ledPin, OUTPUT);
     pinMode(ROLE_PIN, INPUT_PULLUP);
     delay(50);
@@ -595,7 +600,7 @@ void loop() {
         }
 
         if (millis() >= nextPingTime) {
-            nextPingTime = millis() + burstDelay + random(0, 50);  // +0..49 ms jitter to avoid syncing with WiFi beacons
+            nextPingTime = millis() + burstDelay + (unsigned long)JITTER_PRIME_MS[random(0, (int)JITTER_PRIME_COUNT)];
             if (waitingForPong && !plotMode) { 
                 // High last RSSI → likely collision (interference); low last RSSI → likely range/signal too low
                 if (lastKnownRSSI > -80.0) { linkCondition = "INTERFERENCE"; interfMinCounter++; }
