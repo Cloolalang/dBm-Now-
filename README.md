@@ -1,6 +1,6 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v3.6)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v4.0)
 
-ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master.
+ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pings and measures path loss / RSSI; a **Transponder** replies and syncs to the master. The **same firmware** can also run as a **Serial–MQTT bridge** (pull **GPIO 12 to GND** at boot): WiFi Manager, Serial1 RX @ 9600 → MQTT, for 1-way transponder data to the cloud.
 
 **Why this approach?** Can we use a **well-evolved comms protocol** to build **low-cost test equipment** and learn about the RF channel? Established methods (VNAs, spectrum analyzers) are accurate but expensive. The idea here: **reverse-engineering the protocol and hardware** (ESP-NOW, 802.11, commodity ESP32) is very cheap and yields a **novel test method** — RSSI, path loss, link behaviour at a fraction of the cost.
 
@@ -45,7 +45,7 @@ It can also help explore **2.4 GHz ISM band** channel conditions and **device in
 
 The following describes **this firmware’s** usage of the stack: payload, link behaviour, and measurement details.
 
-**This firmware:** Uses a **26-byte** payload (compatible with ESP-NOW v1.0 and v2.0). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
+**This firmware:** Uses a **27-byte** payload (compatible with ESP-NOW v1.0 and v2.0; accepts 25–26 byte payloads from older firmware). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
 
 **RSSI dynamic range:** The reportable RSSI range is roughly **-100 dBm to -30 dBm** (weaker to stronger); **-127** (or sometimes 0) means no signal / invalid. Receiver sensitivity (minimum usable signal) depends on mode: **Long Range 250 kbps** is best (often about -100 to -105 dBm), then **standard 1 Mbps** (about -98 dBm), then LR 500k, then higher 802.11 rates. Usable dynamic range is about **70–75 dB** (sensitivity to saturation). Exact values are chip/board dependent; strong signals can saturate near the upper end. **Initial test findings (ESP32-WROOM):** Measured dynamic range **-15 dBm to -95 dBm** (lowest TX power, all modes STD/LR 250k/LR 500k, ping rate 50 ms). **Expected measurement standard deviation:** In stable conditions (fixed geometry, little multipath), RSSI repeatability is often on the order of **1–3 dB** (σ). With movement, multipath, or changing environment, standard deviation can be **several dB** (e.g. 3–6 dB or more). Averaging over multiple pings or using metal enclosures and fixed antenna positions reduces observed variance.
 
@@ -53,7 +53,7 @@ The following describes **this firmware’s** usage of the stack: payload, link 
 
 **MAC / protocol (this firmware):** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 1–17 ms prime jitter (values 1, 2, 3, 5, 7, 11, 13, 17 ms chosen at random) on each ping interval to avoid periodic alignment with WiFi beacons (e.g. 100 ms TU).
 
-**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (26 bytes). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
+**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (27 bytes; 26-byte payloads from older firmware are accepted). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
 
 | Field | Type | Ping (master sends) | Pong (transponder sends) |
 |-------|------|---------------------|--------------------------|
@@ -66,8 +66,9 @@ The following describes **this firmware’s** usage of the stack: payload, link 
 | `channel` | uint8_t | RF channel 1–14: current channel, or **target channel** during a channel change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF channel |
 | `rfMode` | uint8_t | 0=STD, 1=LR 250k, 2=LR 500k: current mode, or **target mode** during an RF mode change (sent for 3 pings before master switches so transponder can switch first) | Transponder’s current RF mode |
 | `missedCount` | uint8_t | 0 (not used) | Number of packets the transponder missed before this nonce (gap in sequence); 0 = none |
+| `oneWayRF` | uint8_t | 0=normal, 1=request transponder **1-way RF** (reply via JSON on Serial only; no pong) | 0 (not used in pong) |
 
-On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), and rfMode (current or pending target). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap; the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), and **oneWayRF** (1 when master has requested 1-way RF). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
 
 ---
 
@@ -75,9 +76,8 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 
 - **2x ESP32** (any variant with WiFi, e.g. ESP32-WROOM-32).
 - **Wiring**
-  - **ROLE_PIN (GPIO 13)**  
-    - **GND** -> **Master**  
-    - **Leave floating or 3.3V** -> **Transponder**
+  - **BRIDGE_PIN (GPIO 12)** — **GND** -> **Serial-MQTT Bridge mode** (WiFi Manager, Serial1 RX→MQTT). **Leave floating or 3.3V** -> Master/Transponder (see ROLE_PIN).
+  - **ROLE_PIN (GPIO 13)** — only when **not** in Bridge mode: **GND** -> **Master**; **Leave floating or 3.3V** -> **Transponder**.
   - **LED** on **GPIO 2** (on-board LED on most dev boards).
 
 **External antennas (u.fl cables):** If you use ESP32 dev boards with **u.fl cables and external antennas**, **do not connect the two devices directly** without at least **60 dB of attenuation** between them (e.g. attenuators or sufficient physical separation). Direct connection at full TX power can overload the receiver and damage hardware.
@@ -107,16 +107,18 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
    - Tools -> Port -> select the COM port for the plugged-in ESP32.
 
 4. **Open the sketch**
-   - Open `sketch_jan4b/sketch_jan4b.ino` (the folder name must stay `sketch_jan4b` so the .ino is in a folder of the same name).
+   - Open `sketch_jan4b/sketch_jan4b.ino` (the folder contains `sketch_jan4b.ino` and `bridge_mode.ino`; both are compiled. Folder name must stay `sketch_jan4b`.)
 
 5. **Upload**
-   - **The same sketch is uploaded to both devices.** Master vs Transponder is determined by hardware (ROLE_PIN): connect one ESP32, set GPIO 13 for the role you want, then Sketch -> Upload. Repeat for the second ESP32 with the other role.
+   - **The same sketch is uploaded to all devices.** Mode at boot: **GPIO 12 to GND** = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT; requires WiFiManager and PubSubClient libraries). **GPIO 12 floating** = Master or Transponder (GPIO 13: GND = Master, floating = Transponder). Upload once; set GPIO 12 and 13 for the role you want.
 
 ---
 
 ## Dependencies
 
-This project does **not** use any third-party libraries. All code relies on the **ESP32 Arduino core** (by Espressif) and the C/POSIX toolchain it provides.
+**Master/Transponder:** No third-party libraries; all code uses the **ESP32 Arduino core** (by Espressif) and the C/POSIX toolchain it provides.
+
+**Bridge mode (GPIO 12 = GND):** Requires **WiFiManager** (tzapu) and **PubSubClient** (knolleary). Install via Sketch → Include Library → Manage Libraries.
 
 | Include / feature | Provided by | Purpose |
 |------------------|-------------|---------|
@@ -136,8 +138,9 @@ This project does **not** use any third-party libraries. All code relies on the 
 
 ### 1. Assign roles
 
-- **Master**: GPIO 13 **LOW** (e.g. wire to GND). Upload, then open Serial at **115200**.
-- **Transponder**: GPIO 13 **HIGH** or floating. Upload.
+- **Bridge** (Serial–MQTT): **GPIO 12 to GND** at boot. Upload once; first run or no WiFi → AP **SerialMQTTBridge**, configure at **192.168.4.1**. Requires WiFiManager and PubSubClient.
+- **Master**: GPIO 12 **floating**, GPIO 13 **LOW** (e.g. wire to GND). Upload, then open Serial at **115200** (or `SERIAL_BAUD`).
+- **Transponder**: GPIO 12 **floating**, GPIO 13 **HIGH** or floating. Upload.
 
 ### 2. Basic link test
 
@@ -148,7 +151,7 @@ This project does **not** use any third-party libraries. All code relies on the 
    - **TX** is the MAC address of the replying transponder (so you can identify which unit replied). Press **`h`** for full status; the status table shows each device’s **MAC address** and **ESP-NOW mode** (master: TX broadcast, RX unicast; transponder: RX broadcast, TX unicast) for both boards.
 4. **LED on GPIO 2**: blinks on TX (and on transponder on RX).
 
-If you see `[NO REPLY]` with **INTERFERENCE** (last RSSI was high → likely collision) or **SIGNAL TOO LOW** (last RSSI was low → likely range), check distance, antennas, and power (see below).
+If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSON on Serial (no pong over the air); this is normal when 1-way RF is requested. If you see **INTERFERENCE** (last RSSI was high → likely collision) or **SIGNAL TOO LOW** (last RSSI was low → likely range), check distance, antennas, and power (see below).
 
 **Serial output format:**
 - **Master** (incoming pongs): `[HH:MM:SS] N:... | TX aa:bb:cc:dd:ee:ff | FWD Loss:... | BWD Loss:... | Sym:... | Z:... | T:XX.X C | Link%:XX Lavg:Y.Y` — **TX** is the transponder’s MAC address; **T** is chip temperature (°C) or `N/A` if unsupported; **Link%** is a rolling quality over the **last 10 pongs**: **100%** = no missed pings, lower when some pongs reported missed packets; **Lavg** is the average number of missed packets per pong over those last 10. If the chip has reduced TX power due to temperature, a second line may appear: `>> Thermal throttling: TX power reduced to X.X dBm (requested Y.Y dBm)`.
@@ -160,6 +163,7 @@ If you see `[NO REPLY]` with **INTERFERENCE** (last RSSI was high → likely col
 | Key | Action |
 |-----|--------|
 | `l` | Cycle RF mode: STD (802.11) -> 250k -> 500k; master sends new mode in payload for 3 pings before switching (transponder switches first, no restart) |
+| `W` | Toggle **1-way RF request**: master sends request in next ping; transponder switches to 1-way RF (JSON on Serial, no pong) or back to normal (pong over ESP-NOW). |
 | `p` + number | Set master TX power (dBm), e.g. `p14`. **Valid range:** -1 to +20 dBm (typical ESP32; board-dependent). This firmware maps to discrete steps. |
 | `t` + number | Set remote (transponder) target power (dBm), e.g. `t8`. **Valid range:** same as master (-1 to +20 dBm). |
 | `s` | Set remote target power = current master power |
@@ -185,16 +189,30 @@ If you see `[NO REPLY]` with **INTERFERENCE** (last RSSI was high → likely col
 
 **CSV file logging (master):** Press **`f`** to start logging each pong to a `.csv` file on the ESP32 flash (SPIFFS, path `/log.csv`). Columns: timestamp, nonce, fwdLoss, bwdLoss, symmetry, zeroed, masterRSSI, remoteRSSI, linkPct, lavg, chipTempC. **linkPct** is the rolling link quality over the last 10 pongs (100 = no missed pings); **lavg** is the average missed packets per pong over those 10; **chipTempC** is the chip temperature in °C (or -999 when unsupported). Press **`f`** again to stop. Use **`d`** to print the file to Serial so you can copy it to a file on your PC. Use **`e`** to delete the log file. Use **`m`** + seconds (e.g. **`m300`** = 5 min) to set a max recording time; logging auto-stops when the limit is reached (0 = no limit). Requires a partition with SPIFFS (default 4MB partition usually has it).
 
-**CSV file logging (transponder) -- one-way link testing:** On the **transponder**, connect Serial and press **`f`** to start logging each **received ping** (master->transponder) to `/log.csv`. Columns: timestamp, nonce, rfMode, rssi, masterPwr, pathLoss, transponderPwr. Optionally set **`m`** + seconds (e.g. **`m300`**) so logging auto-stops after that time (0 = no limit). Then **walk away with the master**; even when the master gets NO REPLY (one-way link), the transponder keeps logging every packet it receives until you stop or the max time is reached. When you return, connect Serial to the transponder and press **`d`** to dump the log, then copy to your PC. Press **`f`** again to stop logging, or **`e`** to erase the file. Transponder commands: **`0`** Force STD and restart (resync with master), **`f`** toggle log, **`d`** dump, **`e`** erase, **`m`** max time (seconds), **`h`** status.
+**CSV file logging (transponder) -- one-way link testing:** On the **transponder**, connect Serial and press **`f`** to start logging each **received ping** (master->transponder) to `/log.csv`. Columns: timestamp, nonce, rfMode, rssi, masterPwr, pathLoss, transponderPwr. Optionally set **`m`** + seconds (e.g. **`m300`**) so logging auto-stops after that time (0 = no limit). Then **walk away with the master**; even when the master gets NO REPLY (one-way link), the transponder keeps logging every packet it receives until you stop or the max time is reached. When you return, connect Serial to the transponder and press **`d`** to dump the log, then copy to your PC. Press **`f`** again to stop logging, or **`e`** to erase the file. Transponder commands: **`W`** 1-way RF (reply via JSON on Serial, no pong), **`0`** Force STD and restart (resync with master), **`f`** toggle log, **`d`** dump, **`e`** erase, **`m`** max time (seconds), **`h`** status.
 
 ### 4. Transponder behavior
 
-- Listens for master's pings; replies with RSSI and power.
+- Listens for master's pings; replies with RSSI and power (or, in **1-way RF mode**, replies via JSON on Serial only — see below).
+- **`W`** (or **`w`**) on Serial: Toggle **1-way RF mode** (on transponder). You can also control it **from the master**: press **`W`** on the master; the master sends the request in the next ping payload, and the transponder switches to 1-way RF (Serial 9600, JSON only, no pong). Press **`W`** again on the master to request normal mode (transponder will reply with pong again). When ON, the transponder does **not** send a pong over ESP-NOW; instead it outputs one **JSON line per received ping** on Serial. Connect the transponder's Serial TX to a second ESP32 running a Serial–MQTT bridge to publish path loss (etc.) to the cloud. The master will see NO REPLY on the RF link; data is available via MQTT.
 - **`0`** (zero) on Serial: Force RF to STD (802.11b) and restart for resync with master (same as master **`0`**).
-- **Serial RX lines** show each received ping: timestamp, nonce, **master MAC** (Mstr aa:bb:cc:dd:ee:ff), mode, RSSI, Mstr Pwr, Path Loss, **TX Pwr** (transponder transmit power set by master). So you can identify which master sent the ping and see transponder power.
+- **Serial RX lines** show each received ping: timestamp, nonce, **master MAC** (Mstr aa:bb:cc:dd:ee:ff), mode, RSSI, Mstr Pwr, Path Loss, **TX Pwr** (transponder transmit power set by master). So you can identify which master sent the ping and see transponder power. **In 1-way RF mode**, Serial outputs **only** the JSON lines (no status messages, no ">> Missed packet(s)", no response to **`h`**); the LED still flashes on each received packet. This keeps the Serial–MQTT bridge feed clean (NDJSON only).
 - **Follows master's RF channel** (from payload); sets its channel to match.
 - If no packet for a while, it **cycles RF mode** (STD -> 250k -> 500k) to match the master.
 - Syncs its time from the master.
+
+**1-way RF mode (reply via Serial / MQTT to cloud):** Enable with **`W`** on the transponder, or **`W`** on the master (master sends the request in the next ping). The transponder **switches Serial to 9600 baud** when 1-way RF mode is turned ON (to match common Serial–MQTT bridges such as [ESP32-Serial-Bridge](https://github.com/Lumy88/ESP32-Serial-Bridge)); turn OFF via **`W`** on transponder or master to **restore normal Serial baud** and pong over ESP-NOW. In 1-way RF mode the transponder prints **only** one **JSON object per line** on Serial (no other status or messages), e.g. `{"pl":45.2,"rssi":-72,"mp":14,"tp":14,"n":1234,"ch":6,"m":"STD","ts":"12:34:56"}`. Fields: **pl** path loss (dB), **rssi** RSSI (dBm), **mp** master TX power (dBm), **tp** transponder TX power (dBm), **n** nonce, **ch** channel, **m** mode (STD / LR 250k / LR 500k), **ts** timestamp. The **LED still flashes** on each received ping. Connect the transponder's **Serial TX** (and GND) to a second ESP32 running a **Serial–MQTT bridge**; the bridge reads each line and publishes it to an MQTT topic. The master shows **`[NO REPLY] | 1-way mode`** (not INTERFERENCE or SIGNAL TOO LOW) while 1-way RF is requested; the "reply" is the MQTT stream.
+
+**1-way mode wiring (ESP32 dev boards):** The transponder uses **Serial (UART0)** for JSON output. On typical ESP32 dev boards (e.g. ESP32-WROOM-32), UART0 is on **GPIO1 (TX)** and **GPIO3 (RX)** (often the same pins as the USB–UART chip). For 1-way mode you only need **data from transponder → bridge**:
+
+| From (transponder) | To (bridge)   | Notes |
+|--------------------|---------------|--------|
+| **GPIO1 (TX)**     | **GPIO21 (RX)** | JSON data; bridge RX = 21 in [ESP32-Serial-Bridge](https://github.com/Lumy88/ESP32-Serial-Bridge) config |
+| **GND**            | **GND**         | Common ground between both boards |
+
+So: **Transponder GPIO1 (TX) → Bridge GPIO21 (RX)** and **GND → GND**. Do not connect transponder RX to bridge TX unless you need to send commands from the bridge to the transponder. Power each board (e.g. USB); avoid connecting the transponder’s USB to a PC while it is wired to the bridge, so the PC’s serial adapter does not drive the same TX line.
+
+**Built-in Bridge mode (this sketch):** Pull **GPIO 12 to GND** at boot to run the same ESP32 as a **Serial–MQTT bridge** (WiFi Manager, Serial1 RX on **GPIO 21** at 9600 → MQTT). One firmware for Master, Transponder, or Bridge. Wiring: transponder TX (GPIO1) → bridge RX (GPIO21); GND → GND. Requires **WiFiManager** and **PubSubClient** libraries. First run or no WiFi → AP **SerialMQTTBridge**, configure at **192.168.4.1**. Reconfigure: hold BOOT (GPIO0) at boot, or visit **http://\<device-IP\>/reconfigure** when on WiFi.
 
 ### 5. Development tips
 
@@ -216,11 +234,12 @@ The sketch applies a few RF/radio settings for consistent behaviour:
 
 ## Quick reference
 
+- **Mode at boot**: **GPIO 12 = GND** → Serial–MQTT Bridge (WiFi Manager, Serial1 RX @ 9600 → MQTT). **GPIO 12 floating** → Master or Transponder (see ROLE_PIN).
+- **Role (when not Bridge)**: **GPIO 13 = GND** → Master; **GPIO 13 floating/3.3V** → Transponder.
 - **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel 1-14. Both boot on **channel 1** and **standard rate** for quick sync; set channel with **`n`**, switch to LR with **`l`** (session only; reboot = STD again).
-- **Role**: GPIO 13 = GND -> Master; floating/3.3V -> Transponder.
-- **Serial**: 115200, on Master for commands and output. Incoming lines show the other device’s **MAC address** (master: TX = transponder MAC; transponder: Mstr = master MAC). Press **`h`** for full status (MAC, ESP-NOW mode, etc.).
+- **Serial**: 115200 (or `SERIAL_BAUD`), on Master for commands and output. Incoming lines show the other device’s **MAC address** (master: TX = transponder MAC; transponder: Mstr = master MAC). Press **`h`** for full status (MAC, ESP-NOW mode, etc.).
 
-Once both boards are flashed and roles are set, power them and open the Master's Serial Monitor to test and develop.
+Once boards are flashed and GPIO 12/13 are set for the desired role, power them and (for Master) open the Serial Monitor to test and develop.
 
 ---
 
@@ -234,6 +253,7 @@ Once both boards are flashed and roles are set, power them and open the Master's
 
 ## Planned features
 
+- **Note (MQTT bridge and path loss):** The Serial–MQTT bridge uses WiFi on a 2.4 GHz channel. If the bridge uses the **same channel** as the ESP-NOW Master/Transponder link, WiFi traffic from the bridge can interfere with path loss measurements. Best **avoid that channel** for the RF probe link when the bridge is nearby.
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
@@ -246,6 +266,7 @@ Once both boards are flashed and roles are set, power them and open the Master's
 - **RF overload detection** -- Detect when the receiver is overloaded (e.g. antennas too close or insufficient attenuation) and warn or protect the link.
 - **Auto TX power** -- When path loss is below a set point (RX level too high), the master automatically reduces TX power on both master and transponder so that RX level does not exceed a maximum (e.g. -20 dBm) to avoid receiver overload. Conversely, when RX level is too low (path loss above a set point), the master increases TX power on both devices to improve the link.
 - **Configurable PHY rate for standard mode** -- Option to set ESP-NOW PHY rate above the default 1 Mbps (e.g. 24M, 54M, or 802.11n MCS rates) for higher throughput at short range, with tradeoff of range/reliability.
+- **Real-time clock** -- Hardware RTC (e.g. external RTC module or battery-backed RTC) for accurate timestamps across power cycles and when WiFi sync is not available.
 - **Hardware design with rechargeable battery** -- Reference or suggested hardware design for a battery-powered unit with rechargeable battery and charging circuitry.
 - **SD card** -- Hardware and firmware support for recording results to SD card (e.g. in addition to or instead of SPIFFS).
 

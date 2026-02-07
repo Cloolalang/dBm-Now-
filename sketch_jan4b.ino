@@ -3,14 +3,17 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.6 (Transponder Force STD / restart)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v4.0 (1-way RF + built-in Serial–MQTT Bridge)
  * ======================================================================================
+ * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
+ *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "3.6"
+#define FW_VERSION "4.0"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
+#define SERIAL_BAUD_1WAY_RF 9600   // when 1-way RF mode ON: Serial switches to this for Serial-MQTT bridge (e.g. Lumy88)
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -30,7 +33,9 @@ uint8_t temprature_sens_read(void);  // ESP32 internal temp (raw); 128 = invalid
 #endif
 
 // --- HARDWARE ROLE CONFIG ---
-const int ROLE_PIN = 13;
+const int ROLE_PIN = 13;       // LOW = Master, HIGH/floating = Transponder
+const int BRIDGE_PIN = 12;     // LOW = Serial-MQTT Bridge mode (WiFi Manager, Serial1→MQTT); HIGH/floating = Master/Transponder
+bool isBridgeMode = false;     // true when BRIDGE_PIN held LOW at boot
 bool isMaster = false;
 String deviceRole = "UNKNOWN";
 
@@ -48,6 +53,7 @@ unsigned long ledTimer = 0;
 
 // Master Specific
 bool plotMode = false, calibrated = false;
+bool requestOneWayRF = false;   // master requests transponder 1-way RF (no pong; reply via JSON on Serial)
 uint32_t burstDelay = 1000, nonceCounter = 0;
 float remoteTargetPower = -1.0, referenceRSSI = 0;
 unsigned long lastStatusPrint = 0, lastPingTime = 0;
@@ -107,6 +113,7 @@ volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
 // Transponder Specific
 unsigned long lastPacketTime = 0;
 uint32_t transponderTimeout = 5000;
+bool oneWayRFMode = false;   // when true: no ESP-NOW pong; reply via JSON on Serial (for Serial-MQTT bridge to cloud)
 #define TRANSPONDER_CYCLE_AFTER_TIMEOUTS 3   // require this many consecutive timeouts before hunting (avoids cycling on brief fades)
 uint32_t transponderConsecutiveTimeouts = 0;
 uint32_t lastReceivedNonce = 0;   // for gap detection: transponder reports missed packets when nonce is not consecutive 
@@ -124,6 +131,7 @@ typedef struct {
     uint8_t channel;  // RF channel 1–14
     uint8_t rfMode;   // 0=STD, 1=LR 250k, 2=LR 500k
     uint8_t missedCount;  // transponder: number of packets missed before this nonce (gap in sequence)
+    uint8_t oneWayRF;     // master→transponder: 0=normal (pong), 1=1-way RF (reply via JSON on Serial only)
 } Payload;
 Payload myData, txData, rxData;
 
@@ -197,9 +205,9 @@ float getActualMaxTxPowerDbm(void) {
     return (float)power_quarter_dbm * 0.25f;
 }
 
-void setESP32Time(int hr, int min) {
+void setESP32Time(int hr, int min, int sec) {
     struct tm tm = {0}; tm.tm_year = 2026 - 1900; tm.tm_mon = 0; tm.tm_mday = 1;
-    tm.tm_hour = hr; tm.tm_min = min; tm.tm_sec = 0;
+    tm.tm_hour = hr; tm.tm_min = min; tm.tm_sec = (sec >= 0 && sec <= 59) ? sec : 0;
     time_t t = mktime(&tm); struct timeval now = { .tv_sec = t }; settimeofday(&now, NULL);
 }
 
@@ -398,13 +406,27 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         else {
             memcpy(&rxData, incoming, (size_t)len);
             rxData.missedCount = 0;   // old 25-byte payload
+            if (len < (int)sizeof(Payload)) rxData.oneWayRF = 0;   // old payload: no oneWayRF field
+        }
+        if (len >= (int)sizeof(Payload)) {
+            if (rxData.oneWayRF != 0) {
+                if (!oneWayRFMode) {
+                    oneWayRFMode = true;
+                    Serial.begin(SERIAL_BAUD_1WAY_RF);
+                }
+            } else {
+                if (oneWayRFMode) {
+                    oneWayRFMode = false;
+                    Serial.begin(SERIAL_BAUD);
+                }
+            }
         }
         uint8_t missedCount = 0;
         if (lastReceivedNonce != 0 && rxData.nonce > lastReceivedNonce) {
             uint32_t gap = rxData.nonce - lastReceivedNonce - 1;
             if (gap <= 255) {
                 missedCount = (uint8_t)gap;
-                if (Serial) Serial.printf(">> Missed packet(s): nonce(s) %u-%u (gap %u)\n",
+                if (!oneWayRFMode && Serial) Serial.printf(">> Missed packet(s): nonce(s) %u-%u (gap %u)\n",
                     (unsigned)(lastReceivedNonce + 1), (unsigned)(rxData.nonce - 1), (unsigned)missedCount);
             }
         }
@@ -414,10 +436,19 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         float pathLoss = rxData.txPower - rssi;
         const char* rfModeStr = (currentRFMode == MODE_STD) ? "STD" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
         const uint8_t *mstrMac = info->src_addr;
-        if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
-            getFastTimestamp().c_str(), rxData.nonce,
-            mstrMac[0], mstrMac[1], mstrMac[2], mstrMac[3], mstrMac[4], mstrMac[5],
-            rfModeStr, rssi, rxData.txPower, pathLoss, currentPower);
+        if (oneWayRFMode) {
+            // 1-way RF mode: reply via JSON on Serial (no ESP-NOW pong). For Serial-MQTT bridge to cloud.
+            // Use master time from payload so ts increments with each ping (transponder RTC may not have seconds synced yet).
+            char tsBuf[10];
+            snprintf(tsBuf, sizeof(tsBuf), "%02d:%02d:%02d", rxData.hour, rxData.minute, rxData.second);
+            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\"}\n",
+                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf);
+        } else {
+            if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
+                getFastTimestamp().c_str(), rxData.nonce,
+                mstrMac[0], mstrMac[1], mstrMac[2], mstrMac[3], mstrMac[4], mstrMac[5],
+                rfModeStr, rssi, rxData.txPower, pathLoss, currentPower);
+        }
         if (csvFileLogging && csvFile) {
             if (maxRecordingTimeSec > 0 && (millis() - csvLogStartTime) >= (unsigned long)maxRecordingTimeSec * 1000) {
                 csvLogStop();
@@ -428,7 +459,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
                 csvFile.flush();
             }
         }
-        setESP32Time(rxData.hour, rxData.minute);
+        setESP32Time(rxData.hour, rxData.minute, rxData.second);
         if (rxData.rfMode <= 2 && rxData.rfMode != currentRFMode) {
             currentRFMode = rxData.rfMode;
             applyRFSettings(currentRFMode);
@@ -453,19 +484,23 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             esp_now_add_peer(&peerInfo);
         }
         setPower(rxData.targetPower);
-        txData.nonce = rxData.nonce;
-        txData.missedCount = missedCount;
-        txData.txPower = currentPower;
-        txData.channel = wifiChannel;
-        txData.rfMode = currentRFMode;
-        txData.measuredRSSI = (float)info->rx_ctrl->rssi; 
-        esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
+        if (!oneWayRFMode) {
+            txData.nonce = rxData.nonce;
+            txData.missedCount = missedCount;
+            txData.txPower = currentPower;
+            txData.channel = wifiChannel;
+            txData.rfMode = currentRFMode;
+            txData.measuredRSSI = (float)info->rx_ctrl->rssi;
+            txData.oneWayRF = 0;   // pong: transponder does not request 1-way
+            esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
+        }
         digitalWrite(ledPin, HIGH); ledTimer = millis() + 40;
     }
 }
 
 void printDetailedStatus() {
     if (plotMode) return;
+    if (!isMaster && oneWayRFMode) return;   // transponder in 1-way mode: only JSON, no status
     String modeStr = "STANDARD (802.11)";
     if (currentRFMode == MODE_LR_250K) modeStr = "LR (250kbps)";
     if (currentRFMode == MODE_LR_500K) modeStr = "LR (500kbps)";
@@ -480,12 +515,14 @@ void printDetailedStatus() {
         Serial.printf("  ESP-NOW    : TX: broadcast, RX: unicast\n");
         Serial.printf("  LINK STATUS : %s\n", linkCondition.c_str());
         Serial.printf("  MASTER PWR  : %.1f dBm | REMOTE: %.1f dBm\n", currentPower, remoteTargetPower);
+        Serial.printf("  1-WAY RF    : %s (request transponder reply via JSON on Serial, no pong)\n", requestOneWayRF ? "REQUESTED" : "OFF");
         { float t = getChipTempC(); if (t > -100.0f) Serial.printf("  CHIP TEMP   : %.1f C\n", t); else Serial.println("  CHIP TEMP   : N/A"); }
         { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL     : Throttled (actual %.1f dBm, requested %.1f dBm)\n", a, currentPower); else Serial.println("  THERMAL     : OK"); }
         Serial.printf("  CSV LOG     : %s\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX    : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.println("--------------------------------------------------");
         Serial.println("  [l] Toggle Mode    : Cycle STD -> 250k -> 500k");
+        Serial.println("  [W] 1-way RF       : Request transponder reply via JSON on Serial (no pong)");
         Serial.println("  [0] Force STD      : Set RF to 802.11b and restart (resync with transponder)");
         Serial.println("  [p] Master Power   : Set TX power dBm (e.g. p14)");
         Serial.println("  [t] Remote Power   : Set remote target dBm (e.g. t8)");
@@ -507,6 +544,7 @@ void printDetailedStatus() {
         Serial.printf("  TX PWR    : %.1f dBm (transponder transmit power, set by master)\n", currentPower);
         { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL   : Throttled (actual %.1f dBm)\n", a); else Serial.println("  THERMAL   : OK"); }
         Serial.printf("  RF CHANNEL: %u (follows master)\n", wifiChannel);
+        Serial.printf("  1-WAY RF  : %s (reply via JSON on Serial; no ESP-NOW pong)\n", oneWayRFMode ? "ON" : "OFF");
         Serial.printf("  TIMEOUT   : %u ms (cycle RF mode if no ping)\n", transponderTimeout);
         Serial.printf("  CSV LOG   : %s (master→TX reception)\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX   : %u s (0=no limit)\n", maxRecordingTimeSec);
@@ -514,6 +552,7 @@ void printDetailedStatus() {
         Serial.printf("  ESP-NOW    : RX: broadcast, TX: unicast\n");
         Serial.println("  (RX lines: timestamp | N | Mstr MAC | mode | RSSI | Mstr Pwr | Path Loss | TX Pwr)");
         Serial.println("--------------------------------------------------");
+        Serial.println("  [W] 1-way RF      : Reply via JSON on Serial (no pong); for Serial-MQTT bridge to cloud");
         Serial.println("  [0] Force STD     : Set RF to 802.11b and restart (resync with master)");
         Serial.printf("  [f] CSV file log  : Toggle logging to %s (SPIFFS)\n", CSV_PATH);
         Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
@@ -525,6 +564,15 @@ void printDetailedStatus() {
 }
 
 void setup() {
+    pinMode(BRIDGE_PIN, INPUT_PULLUP);
+    delay(50);
+    if (digitalRead(BRIDGE_PIN) == LOW) {
+        isBridgeMode = true;
+        Serial.begin(115200);
+        Serial.println("Bridge mode (GPIO12=LOW). Serial-MQTT bridge starting.");
+        setupBridge();
+        return;
+    }
     Serial.begin(SERIAL_BAUD);
     pinMode(ledPin, OUTPUT);
     pinMode(ROLE_PIN, INPUT_PULLUP);
@@ -551,6 +599,10 @@ void setup() {
 }
 
 void loop() {
+    if (isBridgeMode) {
+        loopBridge();
+        return;
+    }
     if (!promiscuousMode && millis() - lastStatusPrint >= 10000) { lastStatusPrint = millis(); printDetailedStatus(); }
 
     if (isMaster) {
@@ -572,7 +624,7 @@ void loop() {
                 if (val < 0 || val > 2359 || hh > 23 || mm > 59) {
                     if (Serial && !plotMode) Serial.println(">> Invalid time (use HHMM 0000–2359)");
                 } else {
-                    setESP32Time(hh, mm);
+                    setESP32Time(hh, mm, 0);
                 }
             }
             else {
@@ -592,6 +644,11 @@ void loop() {
                         prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end(); 
                         Serial.println(">> RF forced to STD (802.11b), restarting...");
                         delay(100); ESP.restart(); 
+                        break;
+                    case 'W':
+                    case 'w':
+                        requestOneWayRF = !requestOneWayRF;
+                        if (!plotMode) Serial.println(requestOneWayRF ? ">> 1-way RF requested: transponder will reply via JSON on Serial (no pong). Next pings send request." : ">> 1-way RF off: transponder will reply with pong over ESP-NOW.");
                         break;
                     case 'p': setPower(val); break;
                     case 't': {
@@ -660,7 +717,8 @@ void loop() {
             nextPingTime = millis() + burstDelay + (unsigned long)JITTER_PRIME_MS[random(0, (int)JITTER_PRIME_COUNT)];
             if (waitingForPong && !plotMode) { 
                 // High last RSSI → likely collision (interference); low last RSSI → likely range/signal too low
-                if (lastKnownRSSI > -80.0) { linkCondition = "INTERFERENCE"; interfMinCounter++; }
+                if (requestOneWayRF) { linkCondition = "1-way mode"; }
+                else if (lastKnownRSSI > -80.0) { linkCondition = "INTERFERENCE"; interfMinCounter++; }
                 else { linkCondition = "SIGNAL TOO LOW"; rangeMinCounter++; }
                 Serial.printf("[%s] N:%u | [NO REPLY] | %s\n", getFastTimestamp().c_str(), nonceCounter, linkCondition.c_str());
                 if (nonceCounter == 3) Serial.println(">> Tip: Transponder GPIO13 must be HIGH/floating (not GND). Same sketch on both? Wait 15s for RF mode sync.");
@@ -672,6 +730,7 @@ void loop() {
             myData.channel = (pendingChannel != 0) ? pendingChannel : wifiChannel;  // send target channel so transponder can switch first
             myData.rfMode = (pendingRFMode <= 2) ? pendingRFMode : currentRFMode;   // send target RF mode so transponder can switch first
             myData.missedCount = 0;   // master does not use; transponder echoes gap count in pong
+            myData.oneWayRF = requestOneWayRF ? 1 : 0;   // transponder replies via JSON on Serial (no pong) when 1
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;
@@ -708,6 +767,17 @@ void loop() {
                 if (Serial) Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec);
             } else
             switch (cmd) {
+                case 'W':
+                case 'w':
+                    oneWayRFMode = !oneWayRFMode;
+                    if (oneWayRFMode) {
+                        Serial.begin(SERIAL_BAUD_1WAY_RF);
+                        // no status message in 1-way mode: only JSON goes out (for MQTT bridge)
+                    } else {
+                        Serial.begin(SERIAL_BAUD);
+                        if (Serial) Serial.println(">> 1-way RF mode OFF: Serial restored, replying with pong over ESP-NOW.");
+                    }
+                    break;
                 case '0':
                     currentRFMode = MODE_STD;
                     prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end();
