@@ -114,7 +114,7 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 
 ---
 
-## Dependencies
+e ## Dependencies
 
 **Master/Transponder:** No third-party libraries; all code uses the **ESP32 Arduino core** (by Espressif) and the C/POSIX toolchain it provides.
 
@@ -131,6 +131,8 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 | `time.h` / `sys/time.h` | Toolchain (C/POSIX) | RTC/time for timestamps |
 
 **Tested with:** Arduino core for **ESP32 by Espressif** **3.x** (ESP-IDF v5.5), on **ESP32 Dev Module** (ESP32-WROOM-32). Other 3.x versions with ESP-IDF v5.x should be compatible; if you use a different core or IDF version, API changes (e.g. promiscuous callback signature) may require small code updates. Check *Tools → Board → Boards Manager* for your installed core version.
+
+**RSSI and core version:** Per-packet RSSI in the ESP-NOW receive callback is only available with **Arduino-ESP32 3.x** (ESP-IDF 5.x). With **Arduino-ESP32 2.x** (ESP-IDF 4.x) the callback uses the older API and does **not** provide RSSI; RSSI and path loss will show as **-127** (invalid). Use **ESP32 core 3.x** (or a 2.x build that exposes `esp_now_recv_info_t`) for correct RSSI and path loss.
 
 ---
 
