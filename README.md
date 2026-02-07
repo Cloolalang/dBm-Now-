@@ -214,6 +214,8 @@ So: **Transponder GPIO1 (TX) → Bridge GPIO21 (RX)** and **GND → GND**. Do no
 
 **Built-in Bridge mode (this sketch):** Pull **GPIO 12 to GND** at boot to run the same ESP32 as a **Serial–MQTT bridge** (WiFi Manager, Serial1 RX on **GPIO 21** at 9600 → MQTT). One firmware for Master, Transponder, or Bridge. Wiring: transponder TX (GPIO1) → bridge RX (GPIO21); GND → GND. Requires **WiFiManager** and **PubSubClient** libraries. First run or no WiFi → AP **SerialMQTTBridge**, configure at **192.168.4.1**. Reconfigure: hold BOOT (GPIO0) at boot, or visit **http://\<device-IP\>/reconfigure** when on WiFi.
 
+**Viewing 1-way path loss on Android:** Use **[IoT MQTT Panel](https://play.google.com/store/apps/details?id=com.iot.mqtt.panel)** (or similar) on Android to subscribe to the bridge’s MQTT topics and display path loss, RSSI, and other 1-way JSON fields in real time. Configure the bridge to use your **cloud Mosquitto broker** (broker URL, port, and credentials in the bridge’s WiFi Manager or reconfigure page); then in IoT MQTT Panel add the same broker and subscribe to the topic(s) the bridge publishes to.
+
 ### 5. Development tips
 
 - **Single board**: Run one as Master (ROLE_PIN to GND) and use Serial to verify commands and status; link tests need a second board as Transponder.
@@ -239,7 +241,7 @@ The sketch applies a few RF/radio settings for consistent behaviour:
 - **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel 1-14. Both boot on **channel 1** and **standard rate** for quick sync; set channel with **`n`**, switch to LR with **`l`** (session only; reboot = STD again).
 - **Serial**: 115200 (or `SERIAL_BAUD`), on Master for commands and output. Incoming lines show the other device’s **MAC address** (master: TX = transponder MAC; transponder: Mstr = master MAC). Press **`h`** for full status (MAC, ESP-NOW mode, etc.).
 
-**Build / upload:** Arduino IDE: open `sketch_jan4b.ino` (folder also has `bridge_mode.ino`), then Upload.
+**Build / upload:** Arduino IDE: open `sketch_jan4b.ino` (folder also has `bridge_mode.ino`), then Upload. To **flash all 3 boards at once** (COM50, COM51, COM52): install [Arduino CLI](https://arduino.github.io/arduino-cli/), then run **`.\flash_all.ps1`** from the project folder (edit the script if your ports differ).
 
 Once boards are flashed and GPIO 12/13 are set for the desired role, power them and (for Master) open the Serial Monitor to test and develop.
 
@@ -247,6 +249,7 @@ Once boards are flashed and GPIO 12/13 are set for the desired role, power them 
 
 ## Links
 
+- **[IoT MQTT Panel](https://play.google.com/store/apps/details?id=com.iot.mqtt.panel)** (Android) — MQTT client to view 1-way path loss, RSSI, etc. in real time when using a cloud Mosquitto broker with the Serial–MQTT bridge.
 - **[ESP-NOW source (Espressif)](https://github.com/espressif/esp-now)** — Official ESP-NOW component and examples.
 - **[ESP-NOW API (ESP-IDF)](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_now.html)** — ESP-NOW API reference in the ESP-IDF programming guide.
 - **[ESP-IDF Wi-Fi / espnow example](https://github.com/espressif/esp-idf/tree/master/examples/wifi/espnow)** — Example usage of ESP-NOW in ESP-IDF.
@@ -257,6 +260,10 @@ Once boards are flashed and GPIO 12/13 are set for the desired role, power them 
 
 - **Note (MQTT bridge and path loss):** The Serial–MQTT bridge uses WiFi on a 2.4 GHz channel. If the bridge uses the **same channel** as the ESP-NOW Master/Transponder link, WiFi traffic from the bridge can interfere with path loss measurements. Best **avoid that channel** for the RF probe link when the bridge is nearby.
 - **1-way mode persistence after power-cycle:** 1-way mode request should be sent in **each** master packet and checked by the transponder on every received ping, so that if the transponder is power-cycled it re-enters 1-way mode from the next master packet (no need to press **W** again on the transponder).
+- **Transponder remember 1-way mode** — Save the transponder’s 1-way RF state (on/off) to NVS/Preferences so that after a power cycle or reboot it restores 1-way mode without needing the master to send the request again or the user to press **W**.
+- **Add all KPIs in Serial to JSON** — Expose in the 1-way JSON (and/or a dedicated JSON output) every KPI that is currently printed on Serial (e.g. symmetry, zeroed, link%, lavg, chip temp, thermal throttling, etc.); some are still missing from the JSON payload.
+- **Promiscuous mode to MQTT** — Publish promiscuous scan results (e.g. from transponder or a dedicated unit) to MQTT (channel, packet count, avg/min RSSI, busy %) so they can be viewed in IoT MQTT Panel or other subscribers.
+- **Commands via MQTT** — Allow sending some commands to the device over MQTT (e.g. set channel, toggle 1-way RF, start/stop logging) so the master or transponder can be controlled from the cloud or from an app.
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
