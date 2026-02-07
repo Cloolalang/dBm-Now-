@@ -254,6 +254,7 @@ Once boards are flashed and GPIO 12/13 are set for the desired role, power them 
 ## Planned features
 
 - **Note (MQTT bridge and path loss):** The Serial–MQTT bridge uses WiFi on a 2.4 GHz channel. If the bridge uses the **same channel** as the ESP-NOW Master/Transponder link, WiFi traffic from the bridge can interfere with path loss measurements. Best **avoid that channel** for the RF probe link when the bridge is nearby.
+- **1-way mode persistence after power-cycle:** 1-way mode request should be sent in **each** master packet and checked by the transponder on every received ping, so that if the transponder is power-cycled it re-enters 1-way mode from the next master packet (no need to press **W** again on the transponder).
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
