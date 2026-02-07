@@ -14,6 +14,7 @@
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
 #define SERIAL_BAUD_1WAY_RF 9600   // when 1-way RF mode ON: Serial switches to this for Serial-MQTT bridge (e.g. Lumy88)
+#define SERIAL_BAUD_BRIDGE_USB 9600   // bridge mode: USB Serial (debug/config) baud; use 9600 for monitor
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -136,7 +137,7 @@ typedef struct {
 Payload myData, txData, rxData;
 
 // Forward declarations (needed when built as C++ e.g. PlatformIO; Arduino .ino ignores)
-void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len);
+void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int len);
 void handleLED();
 void csvLogStart();
 void csvLogStop();
@@ -167,7 +168,7 @@ void applyRFSettings(uint8_t mode) {
     esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
 
     esp_now_init();
-    esp_now_register_recv_cb(onDataRecvImpl);
+    esp_now_register_recv_cb(onDataRecv);
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, broadcastAddress, 6);
     peerInfo.channel = wifiChannel;
@@ -335,11 +336,7 @@ void promiscuousSweepStep() {
     promDwellStart = millis();
 }
 
-// PlatformIO/Arduino-ESP32 2.x use old callback (mac_addr, data, len); no rx_ctrl/rssi in callback.
-// We use mac_addr as src_addr; RSSI from callback not available in old API, use -127 (invalid) so path loss is wrong until a framework with esp_now_recv_info_t is used.
-static int s_legacyRecvRssi = -127;
-
-void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len) {
+void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int len) {
     if (len < (int)sizeof(Payload) - 1) return;   // accept old 25-byte payload (no missedCount)
     lastPacketTime = millis();
     if (isMaster) {
@@ -347,7 +344,7 @@ void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len) {
         memcpy(&pong, incoming, len >= (int)sizeof(Payload) ? sizeof(pong) : (size_t)len);
         if (len < (int)sizeof(Payload)) pong.missedCount = 0;
         waitingForPong = false; pendingRX = true; 
-        lastKnownRSSI = (float)s_legacyRecvRssi;
+        lastKnownRSSI = (float)info->rx_ctrl->rssi;
         linkCondition = "STABLE"; 
         float mRSSI = lastKnownRSSI; 
         float tRSSI = pong.measuredRSSI;         
@@ -376,7 +373,7 @@ void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len) {
         uint8_t linkPct = (n > 0) ? (uint8_t)(100u - (countWithLoss * 100u) / (uint32_t)n) : 100;  // 100% = no missed pings
         float avgMissed = (n > 0) ? (float)sumMissed / (float)n : 0.0f;
         if (!plotMode) {
-            const uint8_t *txMac = mac_addr;
+            const uint8_t *txMac = info->src_addr;
             float chipTemp = getChipTempC();
             if (chipTemp > -100.0f)
                 Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:%.1f C | Link%%:%u Lavg:%.1f\n",
@@ -438,10 +435,10 @@ void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len) {
         }
         lastReceivedNonce = rxData.nonce;
 
-        float rssi = (float)s_legacyRecvRssi;
+        float rssi = (float)info->rx_ctrl->rssi;
         float pathLoss = rxData.txPower - rssi;
         const char* rfModeStr = (currentRFMode == MODE_STD) ? "STD" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
-        const uint8_t *mstrMac = mac_addr;
+        const uint8_t *mstrMac = info->src_addr;
         if (oneWayRFMode) {
             // 1-way RF mode: reply via JSON on Serial (no ESP-NOW pong). For Serial-MQTT bridge to cloud.
             // Use master time from payload so ts increments with each ping (transponder RTC may not have seconds synced yet).
@@ -474,17 +471,17 @@ void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len) {
             wifiChannel = rxData.channel;
             esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
             // Update master peer to new channel so esp_now_send succeeds (peer channel must match home channel)
-            if (esp_now_is_peer_exist(mac_addr)) {
-                esp_now_del_peer(mac_addr);
+            if (esp_now_is_peer_exist(info->src_addr)) {
+                esp_now_del_peer(info->src_addr);
             }
             esp_now_peer_info_t peerInfo = {};
-            memcpy(peerInfo.peer_addr, mac_addr, 6);
+            memcpy(peerInfo.peer_addr, info->src_addr, 6);
             peerInfo.channel = wifiChannel;
             peerInfo.encrypt = false;
             esp_now_add_peer(&peerInfo);
-        } else if (!esp_now_is_peer_exist(mac_addr)) {
+        } else if (!esp_now_is_peer_exist(info->src_addr)) {
             esp_now_peer_info_t peerInfo = {};
-            memcpy(peerInfo.peer_addr, mac_addr, 6);
+            memcpy(peerInfo.peer_addr, info->src_addr, 6);
             peerInfo.channel = wifiChannel;
             peerInfo.encrypt = false;
             esp_now_add_peer(&peerInfo);
@@ -496,9 +493,9 @@ void onDataRecvImpl(const uint8_t *mac_addr, const uint8_t *incoming, int len) {
             txData.txPower = currentPower;
             txData.channel = wifiChannel;
             txData.rfMode = currentRFMode;
-            txData.measuredRSSI = (float)s_legacyRecvRssi;
+            txData.measuredRSSI = (float)info->rx_ctrl->rssi;
             txData.oneWayRF = 0;   // pong: transponder does not request 1-way
-            esp_now_send(mac_addr, (uint8_t *) &txData, sizeof(txData));
+            esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
         }
         digitalWrite(ledPin, HIGH); ledTimer = millis() + 40;
     }
@@ -574,7 +571,7 @@ void setup() {
     delay(50);
     if (digitalRead(BRIDGE_PIN) == LOW) {
         isBridgeMode = true;
-        Serial.begin(115200);
+        Serial.begin(SERIAL_BAUD_BRIDGE_USB);
         Serial.println("Bridge mode (GPIO12=LOW). Serial-MQTT bridge starting.");
         setupBridge();
         return;

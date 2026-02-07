@@ -14,6 +14,7 @@
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
 #define SERIAL_BAUD_1WAY_RF 9600   // when 1-way RF mode ON: Serial switches to this for Serial-MQTT bridge (e.g. Lumy88)
+#define SERIAL_BAUD_BRIDGE_USB 9600   // bridge mode: USB Serial (debug/config) baud; use 9600 for monitor
 
 #include <esp_now.h>
 #include <WiFi.h>
@@ -568,7 +569,7 @@ void setup() {
     delay(50);
     if (digitalRead(BRIDGE_PIN) == LOW) {
         isBridgeMode = true;
-        Serial.begin(115200);
+        Serial.begin(SERIAL_BAUD_BRIDGE_USB);
         Serial.println("Bridge mode (GPIO12=LOW). Serial-MQTT bridge starting.");
         setupBridge();
         return;
