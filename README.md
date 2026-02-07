@@ -114,23 +114,6 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 
 ---
 
-## Building with PlatformIO
-
-You can build and upload from **PlatformIO** (e.g. in Cursor/VS Code) using the terminal or the PlatformIO sidebar.
-
-**Project layout:** The repo includes a PlatformIO layout: **`platformio.ini`** and **`src/01_sketch_jan4b.ino`**, **`src/02_bridge_mode.ino`**. The Arduino IDE uses the root files **`sketch_jan4b.ino`** and **`bridge_mode.ino`** in the same folder.
-
-**Commands (from the project folder):**
-- **Build:** `pio run`
-- **Upload:** `pio run -t upload`
-- **Serial monitor:** `pio device monitor -b 921600`
-
-**Libraries:** PlatformIO will install **WiFiManager** (tzapu) and **PubSubClient** (knolleary) from `platformio.ini` for Bridge mode.
-
-**RSSI / path loss with PlatformIO:** The current **espressif32** platform uses the older ESP-NOW receive callback API, which does **not** provide per-packet RSSI in the callback. When built with PlatformIO, RSSI and path loss will show as **-127** (invalid). Link behaviour, channel, mode, and JSON/MQTT output still work. For **correct RSSI and path loss** use the **Arduino IDE** with a recent ESP32 board package (e.g. 2.0.14+ with `esp_now_recv_info_t`), or build from the root **`sketch_jan4b.ino`** / **`bridge_mode.ino`** in the Arduino IDE.
-
----
-
 ## Dependencies
 
 **Master/Transponder:** No third-party libraries; all code uses the **ESP32 Arduino core** (by Espressif) and the C/POSIX toolchain it provides.
@@ -256,7 +239,7 @@ The sketch applies a few RF/radio settings for consistent behaviour:
 - **RF**: STD (802.11 b/g/n) or Long Range 250k/500k; channel 1-14. Both boot on **channel 1** and **standard rate** for quick sync; set channel with **`n`**, switch to LR with **`l`** (session only; reboot = STD again).
 - **Serial**: 115200 (or `SERIAL_BAUD`), on Master for commands and output. Incoming lines show the other device’s **MAC address** (master: TX = transponder MAC; transponder: Mstr = master MAC). Press **`h`** for full status (MAC, ESP-NOW mode, etc.).
 
-**Build / upload:** Arduino IDE: open `sketch_jan4b.ino` (folder also has `bridge_mode.ino`), then Upload. PlatformIO: `pio run` (build), `pio run -t upload` (flash), `pio device monitor -b 921600` (serial). See **Building with PlatformIO** for the RSSI caveat when using PlatformIO.
+**Build / upload:** Arduino IDE: open `sketch_jan4b.ino` (folder also has `bridge_mode.ino`), then Upload.
 
 Once boards are flashed and GPIO 12/13 are set for the desired role, power them and (for Master) open the Serial Monitor to test and develop.
 

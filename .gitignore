@@ -1,10 +1,6 @@
-# PlatformIO
+# PlatformIO (not used; keep ignored if present locally)
 .pio/
 .piolibdeps/
-.vscode/.browse.cwd.bak
-.vscode/c_cpp_properties.json
-.vscode/launch.json
-.vscode/ipch
 
 # Arduino / IDE
 *.ino.bak
