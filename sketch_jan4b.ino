@@ -3,11 +3,11 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.5 (Serial validation, Promiscuous Scan)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v3.6 (Transponder Force STD / restart)
  * ======================================================================================
  */
 
-#define FW_VERSION "3.5"
+#define FW_VERSION "3.6"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -94,7 +94,7 @@ const unsigned long promDwellMs = 2143;  // ~30 s total for 14 channels
 #define TX_POWER_MIN (-1.0f)
 #define TX_POWER_MAX 20.0f
 #define PING_INTERVAL_MIN_MS 10u
-#define PING_INTERVAL_MIN_LR_MS 25u
+#define PING_INTERVAL_MIN_LR_MS 10u   // LR can work at 10 ms like STD
 #define PING_INTERVAL_MAX_MS 86400000u   // 24 h
 #define MAX_RECORD_TIME_SEC 31536000u    // 1 year
 // Jitter: prime ms values 1–17 to avoid periodic alignment with WiFi beacons (e.g. 100 ms TU)
@@ -514,6 +514,7 @@ void printDetailedStatus() {
         Serial.printf("  ESP-NOW    : RX: broadcast, TX: unicast\n");
         Serial.println("  (RX lines: timestamp | N | Mstr MAC | mode | RSSI | Mstr Pwr | Path Loss | TX Pwr)");
         Serial.println("--------------------------------------------------");
+        Serial.println("  [0] Force STD     : Set RF to 802.11b and restart (resync with master)");
         Serial.printf("  [f] CSV file log  : Toggle logging to %s (SPIFFS)\n", CSV_PATH);
         Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
         Serial.println("  [e] Erase CSV     : Delete log file for fresh start");
@@ -707,6 +708,12 @@ void loop() {
                 if (Serial) Serial.printf(">> CSV max record time: %u s (0=no limit)\n", maxRecordingTimeSec);
             } else
             switch (cmd) {
+                case '0':
+                    currentRFMode = MODE_STD;
+                    prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end();
+                    if (Serial) Serial.println(">> RF forced to STD (802.11b), restarting...");
+                    delay(100); ESP.restart();
+                    break;
                 case 'f': if (csvFileLogging) csvLogStop(); else csvLogStart(); break;
                 case 'd': csvLogDump(); break;
                 case 'e': csvLogErase(); break;
