@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v4.1)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v4.5)
 
 ## Table of contents
 
@@ -9,6 +9,7 @@
 - [Quick start](#quick-start) — get a link in a few steps
 - [Usage and testing](#usage-and-testing) — roles, link test, Serial commands, 1-way RF, CSV, tips
 - [Quick reference](#quick-reference) — GPIO, RF, Serial, build
+- [Default settings on first run](#default-settings-on-first-run) — Master, Transponder, Bridge
 - [Links](#links) — Android apps, ESP-NOW docs
 - [Planned features](#planned-features)
 - [Legal and compliance](#legal-and-compliance)
@@ -308,6 +309,54 @@ LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 | **RF** | STD or Long Range 250k/500k; channel 1–14. Boot: channel 1, standard rate. **`n`** = channel, **`l`** = cycle mode. |
 | **Serial** | 115200 (or `SERIAL_BAUD`) on Master. **`h`** = full status (MAC, ESP-NOW mode). |
 | **Build** | Arduino IDE: open `sketch_jan4b.ino`, Upload. **Flash all 3:** [Arduino CLI](https://arduino.github.io/arduino-cli/) + **`.\flash_all.ps1`** (edit COM ports in script). |
+
+---
+
+## Default settings on first run
+
+Values below apply when nothing has been configured by the user (no NVS/config yet). Master does not load channel or RF mode from NVS on boot; transponder loads only **hunt on timeout** from NVS (default OFF). Bridge uses the MQTT defaults until configured via the AP.
+
+**Master** (GPIO 12 floating, GPIO 13 → GND)
+
+| Setting | Default |
+|---------|---------|
+| RF mode | STD (802.11 b/g/n) |
+| RF channel | 1 |
+| Master TX power | -1 dBm |
+| Remote (transponder) target power | -1 dBm |
+| Ping interval | 1000 ms |
+| 1-way RF request | OFF |
+| Zero cal (Z) | Not calibrated |
+| Plot mode | OFF |
+| CSV file logging | OFF |
+| CSV max record time | 0 (no limit) |
+| Promiscuous mode | OFF |
+| Serial baud | 115200 (or `SERIAL_BAUD`) |
+
+**Transponder** (GPIO 12 floating, GPIO 13 floating)
+
+| Setting | Default |
+|---------|---------|
+| RF mode | STD (802.11 b/g/n) |
+| RF channel | 1 (follows master from payload) |
+| TX power | -1 dBm (until first ping; then follows master target) |
+| Hunt on timeout | OFF |
+| 1-way RF mode | OFF |
+| Serial baud | 115200 (or `SERIAL_BAUD`; 9600 when 1-way RF is ON) |
+| CSV file logging | OFF |
+| CSV max record time | 0 (no limit) |
+
+**Bridge** (GPIO 12 → GND at boot)
+
+| Setting | Default (first run, no WiFi/MQTT config) |
+|---------|------------------------------------------|
+| Serial1 (RX) | GPIO 21 @ 9600 baud |
+| MQTT broker | 192.168.1.100 |
+| MQTT port | 1883 |
+| MQTT topic | Esp32/result |
+| MQTT user / pass | (empty) |
+| WiFi | Not configured → AP **SerialMQTTBridge** at 192.168.4.1 |
+| USB Serial (debug) | 9600 (`SERIAL_BAUD_BRIDGE_USB`) |
 
 ---
 
