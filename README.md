@@ -278,6 +278,8 @@ LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 
 **Built-in Bridge:** GPIO 12 → GND at boot = Serial–MQTT bridge (Serial1 RX GPIO 21 @ 9600 → MQTT). Same firmware. WiFiManager + PubSubClient. First run → AP **SerialMQTTBridge** at 192.168.4.1. Reconfigure: BOOT at boot or **http://\<IP\>/reconfigure**.
 
+**Note (MQTT bridge and path loss):** The Serial–MQTT bridge uses WiFi on a 2.4 GHz channel. If the bridge uses the **same channel** as the ESP-NOW Master/Transponder link, WiFi traffic from the bridge can interfere with path loss measurements. Best **avoid that channel** for the RF probe link when the bridge is nearby.
+
 **Viewing on Android:** [IoT MQTT Panel](https://play.google.com/store/apps/details?id=com.iot.mqtt.panel) — subscribe to bridge topics; use a cloud Mosquitto broker and same credentials in the app.
 
 ### 6. Development tips
@@ -374,7 +376,6 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 ## Planned features
 
-- **Note (MQTT bridge and path loss):** The Serial–MQTT bridge uses WiFi on a 2.4 GHz channel. If the bridge uses the **same channel** as the ESP-NOW Master/Transponder link, WiFi traffic from the bridge can interfere with path loss measurements. Best **avoid that channel** for the RF probe link when the bridge is nearby.
 - **1-way mode persistence after power-cycle:** 1-way mode request should be sent in **each** master packet and checked by the transponder on every received ping, so that if the transponder is power-cycled it re-enters 1-way mode from the next master packet (no need to press **W** again on the transponder).
 - **Transponder remember 1-way mode** — Save the transponder’s 1-way RF state (on/off) to NVS/Preferences so that after a power cycle or reboot it restores 1-way mode without needing the master to send the request again or the user to press **W**.
 - **Add all KPIs in Serial to JSON** — Expose in the 1-way JSON (and/or a dedicated JSON output) every KPI that is currently printed on Serial (e.g. symmetry, zeroed, link%, lavg, chip temp, thermal throttling, etc.); some are still missing from the JSON payload.
