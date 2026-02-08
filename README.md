@@ -178,7 +178,7 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
    - **TX** is the MAC address of the replying transponder (so you can identify which unit replied). Press **`h`** for full status; the status table shows each device’s **MAC address** and **ESP-NOW mode** (master: TX broadcast, RX unicast; transponder: RX broadcast, TX unicast) for both boards.
 4. **LED on GPIO 2**: blinks on TX (and on transponder on RX).
 
-If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSON on Serial (no pong over the air); this is normal when 1-way RF is requested. If you see **INTERFERENCE** (last RSSI was high → likely collision) or **SIGNAL TOO LOW** (last RSSI was low → likely range), check distance, antennas, and power (see below).
+If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSON on Serial (no pong over the air); this is normal when 1-way RF is requested. If the **master** was power-cycled but the **transponder** was left in 1-way mode (persisted in NVS), the master will also see no reply; after the 3rd timeout the master prints a tip: press **W** on the master to request 1-way (so both are in sync), or connect Serial to the transponder and press **W** to turn 1-way OFF. For other no-reply cases: **INTERFERENCE** (last RSSI was high → likely collision) or **SIGNAL TOO LOW** (last RSSI was low → likely range) — check distance, antennas, and power (see below).
 
 **Serial output format:**
 
@@ -239,10 +239,10 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 
 ### 5. 1-way RF mode
 
-Enable with **`W`** on transponder or master. Transponder switches Serial to **9600 baud** (for Serial–MQTT bridges); prints **one JSON object per line** (no other output). Turn OFF with **`W`** again to restore pong over ESP-NOW.
+Enable with **`W`** on transponder or master. Transponder switches Serial to **9600 baud** (for Serial–MQTT bridges); prints **one JSON object per line** (no other output). Turn OFF with **`W`** again to restore pong over ESP-NOW. **1-way mode is stored in NVS** (Preferences); after a power cycle the transponder comes back up in 1-way mode with Serial at 9600 so no re-configuration is needed.
 
 **Example:**  
-`{"pl":45.2,"rssi":-72,"mp":14,"tp":14,"n":1234,"ch":6,"m":"STD","ts":"12:34:56","missed":0,"linkPct":100,"lavg":0.0,"temp":42.5,"z":0.0,"sym":0.5,"plSD":0.8}`
+`{"pl":45.2,"rssi":-72,"mp":14,"tp":14,"n":1234,"ch":6,"m":"STD","ts":"12:34:56","missed":0,"linkPct":100,"lavg":0.0,"temp":42.5,"z":0.0,"plSD":0.8}`
 
 **1-way JSON fields**
 
@@ -255,8 +255,7 @@ Enable with **`W`** on transponder or master. Transponder switches Serial to **9
 | **ts** | Timestamp (from master) |
 | **missed**, **linkPct**, **lavg** | Missed packets, rolling link % (last 10), rolling avg missed |
 | **temp** | Transponder chip temp (°C; -999 if unsupported) |
-| **z** | Master zeroed: delta from reference RSSI (0 if not calibrated). In 1-way mode always **0** (no pongs → no update). |
-| **sym** | Master symmetry: fwdLoss − bwdLoss (0 in 1-way mode). |
+| **z** | In 1-way mode: **transponder-computed** (RSSI − reference from first ping in 1-way) so **z updates** on MQTT. In 2-way: master zeroed (delta from ref RSSI). |
 | **plSD** | Path loss SD (dB): in 1-way mode computed on the **transponder** (SD of last 10 path losses) so it **updates** on MQTT; in 2-way the master sends it (0 when master has no pongs). |
 
 **Interpretation**
@@ -264,8 +263,7 @@ Enable with **`W`** on transponder or master. Transponder switches Serial to **9
 | Metric | Meaning |
 |--------|---------|
 | **Zeroed (z)** | Master sets reference RSSI on first pong (or `z`). **z** = current backward RSSI − reference. Track change from baseline (drift, cable/antenna, movement). |
-| **Symmetry (sym)** | sym ≠ 0 = one direction worse — often one receiver has interference or higher noise. **Positive** → transponder impaired; **Negative** → master impaired. |
-| **Path loss SD (plSD)** | In 1-way mode the **transponder** computes plSD (SD of last 10 path losses) so it **updates** on MQTT. **z** and **sym** stay 0 in 1-way (no pong data). **plSD** > ~3 dB suggests one or both devices mobile or near moving objects (RF fading). |
+| **Path loss SD (plSD)** | In 1-way mode the **transponder** computes plSD (SD of last 10 path losses) so it **updates** on MQTT. **plSD** > ~3 dB suggests one or both devices mobile or near moving objects (RF fading). |
 
 LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 
@@ -376,10 +374,8 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 ## Planned features
 
-- **1-way mode persistence after power-cycle:** 1-way mode request should be sent in **each** master packet and checked by the transponder on every received ping, so that if the transponder is power-cycled it re-enters 1-way mode from the next master packet (no need to press **W** again on the transponder).
-- **Transponder remember 1-way mode** — Save the transponder’s 1-way RF state (on/off) to NVS/Preferences so that after a power cycle or reboot it restores 1-way mode without needing the master to send the request again or the user to press **W**.
-- **Add all KPIs in Serial to JSON** — Expose in the 1-way JSON (and/or a dedicated JSON output) every KPI that is currently printed on Serial (e.g. symmetry, zeroed, link%, lavg, chip temp, thermal throttling, etc.); some are still missing from the JSON payload.
-- **Promiscuous mode to MQTT** — Publish promiscuous scan results (e.g. from transponder or a dedicated unit) to MQTT (channel, packet count, avg/min RSSI, busy %) so they can be viewed in IoT MQTT Panel or other subscribers.
+
+
 - **Commands via MQTT** — Allow sending some commands to the device over MQTT (e.g. set channel, toggle 1-way RF, start/stop logging) so the master or transponder can be controlled from the cloud or from an app.
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.

@@ -138,6 +138,9 @@ float oneWayPathLossHistory[ONE_WAY_PL_HISTORY_LEN];
 uint8_t oneWayPathLossIdx = 0;
 uint8_t oneWayPathLossCount = 0;
 float oneWayPathLossSD = 0.0f;
+// Transponder zeroed (z): reference RSSI from first ping in 1-way so z updates in 1-way JSON/MQTT
+float oneWayRefRSSI = 0.0f;
+bool oneWayRefSet = false;
 
 enum LEDState { IDLE, TX_FLASH, GAP, RX_FLASH };
 LEDState currentLEDState = IDLE;
@@ -456,12 +459,16 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             if (rxData.oneWayRF != 0) {
                 if (!oneWayRFMode) {
                     oneWayRFMode = true;
+                    oneWayRefSet = false;   // reset z reference when entering 1-way so first ping sets it
                     Serial.begin(SERIAL_BAUD_1WAY_RF);
+                    prefs.begin("probe", false); prefs.putBool("oneWay", true); prefs.end();   // persist for power cycle
                 }
             } else {
                 if (oneWayRFMode) {
                     oneWayRFMode = false;
+                    oneWayRefSet = false;
                     Serial.begin(SERIAL_BAUD);
+                    prefs.begin("probe", false); prefs.putBool("oneWay", false); prefs.end();   // persist for power cycle
                 }
             }
         }
@@ -514,15 +521,15 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
                 plVar += d * d;
             }
             oneWayPathLossSD = (plN > 1) ? sqrtf(plVar / (float)(plN - 1)) : 0.0f;
+            // Transponder z: set reference on first ping in 1-way, then z = rssi - reference (so z updates on MQTT)
+            if (!oneWayRefSet) { oneWayRefRSSI = rssi; oneWayRefSet = true; }
+            float zVal = oneWayRefSet ? (rssi - oneWayRefRSSI) : 0.0f;   // transponder-computed z in 1-way (updates)
+            float plSDOut = oneWayPathLossSD;
             float chipTemp = getChipTempC();
             char tsBuf[10];
             snprintf(tsBuf, sizeof(tsBuf), "%02d:%02d:%02d", rxData.hour, rxData.minute, rxData.second);
-            float zVal = (len >= (int)sizeof(Payload)) ? rxData.zeroed : 0.0f;   // Z from master (0 in 1-way; no pongs)
-            float symVal = (len >= (int)sizeof(Payload)) ? rxData.symmetry : 0.0f;   // symmetry from master (0 in 1-way)
-            // plSD: transponder-computed (updates in 1-way); master sends 0 in 1-way so we use oneWayPathLossSD
-            float plSDOut = oneWayPathLossSD;
-            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"missed\":%u,\"linkPct\":%u,\"lavg\":%.1f,\"temp\":%.1f,\"z\":%.1f,\"sym\":%.1f,\"plSD\":%.1f}\n",
-                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, symVal, plSDOut);
+            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"missed\":%u,\"linkPct\":%u,\"lavg\":%.1f,\"temp\":%.1f,\"z\":%.1f,\"plSD\":%.1f}\n",
+                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, plSDOut);
         } else {
             if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
                 getFastTimestamp().c_str(), rxData.nonce,
@@ -674,7 +681,9 @@ void setup() {
     } else {
         prefs.begin("probe", true);
         transponderHuntOnTimeout = prefs.getBool("huntT", false);   // default OFF for open-air / lossy links
+        oneWayRFMode = prefs.getBool("oneWay", false);   // restore 1-way mode after power cycle
         prefs.end();
+        if (oneWayRFMode) Serial.begin(SERIAL_BAUD_1WAY_RF);   // 9600 for Serial–MQTT bridge when 1-way persisted
     }
     
     applyRFSettings(currentRFMode);
@@ -807,7 +816,10 @@ void loop() {
                 else if (lastKnownRSSI > -80.0) { linkCondition = "INTERFERENCE"; interfMinCounter++; }
                 else { linkCondition = "SIGNAL TOO LOW"; rangeMinCounter++; }
                 Serial.printf("[%s] N:%u | [NO REPLY] | %s\n", getFastTimestamp().c_str(), nonceCounter, linkCondition.c_str());
-                if (nonceCounter == 3) Serial.println(">> Tip: Transponder GPIO13 must be HIGH/floating (not GND). Same sketch on both? Wait 15s for RF mode sync.");
+                if (nonceCounter == 3) {
+                    Serial.println(">> Tip: Transponder GPIO13 must be HIGH/floating (not GND). Same sketch on both? Wait 15s for RF mode sync.");
+                    Serial.println(">> If transponder was left in 1-way mode (persists after power cycle), it won't pong. Master: press W to request 1-way; or connect Serial to transponder and press W to turn 1-way OFF.");
+                }
             }
             lastPingTime = millis(); nonceCounter++; waitingForPong = true; 
             time_t now; time(&now); struct tm ti; localtime_r(&now, &ti);
@@ -866,6 +878,7 @@ void loop() {
                 case 'W':
                 case 'w':
                     oneWayRFMode = !oneWayRFMode;
+                    prefs.begin("probe", false); prefs.putBool("oneWay", oneWayRFMode); prefs.end();   // persist for power cycle
                     if (oneWayRFMode) {
                         Serial.begin(SERIAL_BAUD_1WAY_RF);
                         // no status message in 1-way mode: only JSON goes out (for MQTT bridge)
