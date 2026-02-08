@@ -24,6 +24,7 @@
 #include <SPIFFS.h>
 #include <time.h>
 #include <sys/time.h>
+#include <math.h>   // sqrtf for path loss SD
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +58,7 @@ bool plotMode = false, calibrated = false;
 bool requestOneWayRF = false;   // master requests transponder 1-way RF (no pong; reply via JSON on Serial)
 uint32_t burstDelay = 1000, nonceCounter = 0;
 float remoteTargetPower = -1.0, referenceRSSI = 0;
+float lastSymmetry = 0.0f;   // master: symmetry from last pong, sent in payload for 1-way JSON
 unsigned long lastStatusPrint = 0, lastPingTime = 0;
 bool waitingForPong = false, pendingRX = false;
 unsigned long nextPingTime = 0;
@@ -73,6 +75,13 @@ unsigned long csvLogStartTime = 0;   // set when logging starts
 uint8_t missedHistory[MISSED_HISTORY_LEN];
 uint8_t missedHistoryIdx = 0;
 uint8_t missedHistoryCount = 0;   // 0..MISSED_HISTORY_LEN
+
+// Path loss SD (master: last 10 forward path losses, for 1-way JSON plSD)
+#define PATHLOSS_HISTORY_LEN 10
+float pathLossHistory[PATHLOSS_HISTORY_LEN];
+uint8_t pathLossHistoryIdx = 0;
+uint8_t pathLossHistoryCount = 0;   // 0..PATHLOSS_HISTORY_LEN
+float lastPathLossSD = 0.0f;
 
 // Rolling Minute Counters
 float lastKnownRSSI = -100.0;
@@ -119,6 +128,10 @@ bool transponderHuntOnTimeout = false;   // when true: cycle channel/mode after 
 #define TRANSPONDER_CYCLE_AFTER_TIMEOUTS 3   // require this many consecutive timeouts before hunting (avoids cycling on brief fades)
 uint32_t transponderConsecutiveTimeouts = 0;
 uint32_t lastReceivedNonce = 0;   // for gap detection: transponder reports missed packets when nonce is not consecutive 
+// Rolling missed on transponder (for 1-way JSON linkPct/lavg)
+uint8_t oneWayMissedHistory[MISSED_HISTORY_LEN];
+uint8_t oneWayMissedIdx = 0;
+uint8_t oneWayMissedCount = 0;   // 0..MISSED_HISTORY_LEN
 
 enum LEDState { IDLE, TX_FLASH, GAP, RX_FLASH };
 LEDState currentLEDState = IDLE;
@@ -134,6 +147,9 @@ typedef struct {
     uint8_t rfMode;   // 0=STD, 1=LR 250k, 2=LR 500k
     uint8_t missedCount;  // transponder: number of packets missed before this nonce (gap in sequence)
     uint8_t oneWayRF;     // master→transponder: 0=normal (pong), 1=1-way RF (reply via JSON on Serial only)
+    float zeroed;         // master: Z = (lastKnownRSSI - referenceRSSI) when calibrated; sent so transponder can include in 1-way JSON
+    float symmetry;      // master: fwdLoss - bwdLoss from last pong; sent so transponder can include in 1-way JSON
+    float pathLossSD;    // master: SD of last 10 forward path losses; sent so transponder can include in 1-way JSON
 } Payload;
 Payload myData, txData, rxData;
 
@@ -351,8 +367,28 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         float t_tx_eff = (pong.txPower != 0) ? pong.txPower : remoteTargetPower;
         float bwdLoss = t_tx_eff - mRSSI;
         float symmetry = fwdLoss - bwdLoss;
+        lastSymmetry = symmetry;   // for 1-way JSON in next ping
         if (!calibrated && referenceRSSI == 1.0f) { referenceRSSI = mRSSI; calibrated = true; }
         float zeroed = calibrated ? (mRSSI - referenceRSSI) : 0;
+
+        // Path loss SD: rolling last PATHLOSS_HISTORY_LEN forward path losses
+        pathLossHistory[pathLossHistoryIdx] = fwdLoss;
+        pathLossHistoryIdx = (pathLossHistoryIdx + 1) % PATHLOSS_HISTORY_LEN;
+        if (pathLossHistoryCount < PATHLOSS_HISTORY_LEN) pathLossHistoryCount++;
+        uint8_t plN = pathLossHistoryCount;
+        float plSum = 0.0f;
+        for (uint8_t i = 0; i < plN; i++) {
+            uint8_t j = (plN == PATHLOSS_HISTORY_LEN) ? (uint8_t)((pathLossHistoryIdx + i) % PATHLOSS_HISTORY_LEN) : i;
+            plSum += pathLossHistory[j];
+        }
+        float plMean = (plN > 0) ? plSum / (float)plN : 0.0f;
+        float plVar = 0.0f;
+        for (uint8_t i = 0; i < plN; i++) {
+            uint8_t j = (plN == PATHLOSS_HISTORY_LEN) ? (uint8_t)((pathLossHistoryIdx + i) % PATHLOSS_HISTORY_LEN) : i;
+            float d = pathLossHistory[j] - plMean;
+            plVar += d * d;
+        }
+        lastPathLossSD = (plN > 1) ? sqrtf(plVar / (float)(plN - 1)) : 0.0f;   // sample SD (n-1)
 
         if (pong.missedCount > 0 && !plotMode)
             Serial.printf(">> Transponder missed %u packet(s) (nonce(s) %u-%u)\n",
@@ -375,20 +411,20 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             const uint8_t *txMac = info->src_addr;
             float chipTemp = getChipTempC();
             if (chipTemp > -100.0f)
-                Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:%.1f C | Link%%:%u Lavg:%.1f\n",
+                Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:%.1f C | Link%%:%u Lavg:%.1f | plSD:%.1f\n",
                               getFastTimestamp().c_str(), nonceCounter,
                               txMac[0], txMac[1], txMac[2], txMac[3], txMac[4], txMac[5],
-                              fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed, chipTemp, linkPct, avgMissed);
+                              fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed, chipTemp, linkPct, avgMissed, lastPathLossSD);
             else
-                Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:N/A | Link%%:%u Lavg:%.1f\n",
+                Serial.printf("[%s] N:%u | TX %02x:%02x:%02x:%02x:%02x:%02x | FWD Loss:%.1f (R:%.0f) | BWD Loss:%.1f (R:%.0f) | Sym:%.1f | Z:%.1f | T:N/A | Link%%:%u Lavg:%.1f | plSD:%.1f\n",
                               getFastTimestamp().c_str(), nonceCounter,
                               txMac[0], txMac[1], txMac[2], txMac[3], txMac[4], txMac[5],
-                              fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed, linkPct, avgMissed);
+                              fwdLoss, tRSSI, bwdLoss, mRSSI, symmetry, zeroed, linkPct, avgMissed, lastPathLossSD);
             float actualMax = getActualMaxTxPowerDbm();
             if (actualMax > -100.0f && actualMax < currentPower - 1.0f)
                 Serial.printf(">> Thermal throttling: TX power reduced to %.1f dBm (requested %.1f dBm)\n", actualMax, currentPower);
         } else {
-            Serial.printf("%u,%.1f,%.1f,%.1f,%.1f,%u,%.1f\n", (unsigned)wifiChannel, fwdLoss, bwdLoss, symmetry, zeroed, linkPct, avgMissed);
+            Serial.printf("%u,%.1f,%.1f,%.1f,%.1f,%u,%.1f,%.1f\n", (unsigned)wifiChannel, fwdLoss, bwdLoss, symmetry, zeroed, linkPct, avgMissed, lastPathLossSD);
         }
         if (csvFileLogging && csvFile) {
             if (maxRecordingTimeSec > 0 && (millis() - csvLogStartTime) >= (unsigned long)maxRecordingTimeSec * 1000) {
@@ -396,8 +432,8 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
                 Serial.println(">> CSV logging stopped (max time reached).");
             } else {
                 float chipTemp = getChipTempC();
-                csvFile.printf("%s,%u,%.1f,%.1f,%.1f,%.1f,%.0f,%.0f,%u,%.1f,%.1f\n",
-                    getFastTimestamp().c_str(), nonceCounter, fwdLoss, bwdLoss, symmetry, zeroed, mRSSI, tRSSI, linkPct, avgMissed, chipTemp);
+                csvFile.printf("%s,%u,%.1f,%.1f,%.1f,%.1f,%.0f,%.0f,%u,%.1f,%.1f,%.1f\n",
+                    getFastTimestamp().c_str(), nonceCounter, fwdLoss, bwdLoss, symmetry, zeroed, mRSSI, tRSSI, linkPct, avgMissed, chipTemp, lastPathLossSD);
                 csvFile.flush();
             }
         }
@@ -441,10 +477,27 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         if (oneWayRFMode) {
             // 1-way RF mode: reply via JSON on Serial (no ESP-NOW pong). For Serial-MQTT bridge to cloud.
             // Use master time from payload so ts increments with each ping (transponder RTC may not have seconds synced yet).
+            oneWayMissedHistory[oneWayMissedIdx] = missedCount;
+            oneWayMissedIdx = (oneWayMissedIdx + 1) % MISSED_HISTORY_LEN;
+            if (oneWayMissedCount < MISSED_HISTORY_LEN) oneWayMissedCount++;
+            uint8_t n = oneWayMissedCount;
+            uint32_t sumMissed = 0;
+            uint8_t countWithLoss = 0;
+            for (uint8_t i = 0; i < n; i++) {
+                uint8_t j = (n == MISSED_HISTORY_LEN) ? (uint8_t)((oneWayMissedIdx + i) % MISSED_HISTORY_LEN) : i;
+                sumMissed += oneWayMissedHistory[j];
+                if (oneWayMissedHistory[j] > 0) countWithLoss++;
+            }
+            uint8_t linkPct = (n > 0) ? (uint8_t)(100u - (countWithLoss * 100u) / (uint32_t)n) : 100;
+            float lavg = (n > 0) ? (float)sumMissed / (float)n : 0.0f;
+            float chipTemp = getChipTempC();
             char tsBuf[10];
             snprintf(tsBuf, sizeof(tsBuf), "%02d:%02d:%02d", rxData.hour, rxData.minute, rxData.second);
-            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\"}\n",
-                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf);
+            float zVal = (len >= (int)sizeof(Payload)) ? rxData.zeroed : 0.0f;   // Z from master (0 if old payload)
+            float symVal = (len >= (int)sizeof(Payload)) ? rxData.symmetry : 0.0f;   // symmetry from master (0 if old payload)
+            float plSDVal = (len >= (int)sizeof(Payload)) ? rxData.pathLossSD : 0.0f;   // path loss SD from master (0 if old payload)
+            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"missed\":%u,\"linkPct\":%u,\"lavg\":%.1f,\"temp\":%.1f,\"z\":%.1f,\"sym\":%.1f,\"plSD\":%.1f}\n",
+                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, symVal, plSDVal);
         } else {
             if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
                 getFastTimestamp().c_str(), rxData.nonce,
@@ -739,6 +792,16 @@ void loop() {
             myData.rfMode = (pendingRFMode <= 2) ? pendingRFMode : currentRFMode;   // send target RF mode so transponder can switch first
             myData.missedCount = 0;   // master does not use; transponder echoes gap count in pong
             myData.oneWayRF = requestOneWayRF ? 1 : 0;   // transponder replies via JSON on Serial (no pong) when 1
+            // In 1-way RF mode master never gets pongs, so lastKnownRSSI/lastSymmetry never update; send 0 so JSON is not stale
+            if (requestOneWayRF) {
+                myData.zeroed = 0.0f;
+                myData.symmetry = 0.0f;
+                myData.pathLossSD = 0.0f;
+            } else {
+                myData.zeroed = calibrated ? (lastKnownRSSI - referenceRSSI) : 0.0f;   // Z value for 1-way JSON (when 2-way)
+                myData.symmetry = lastSymmetry;   // fwdLoss - bwdLoss from last pong
+                myData.pathLossSD = lastPathLossSD;   // SD of last 10 forward path losses for 1-way JSON
+            }
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;
