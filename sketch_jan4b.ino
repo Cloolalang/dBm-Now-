@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v4.0 (1-way RF + built-in Serial–MQTT Bridge)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v4.1 (1-way RF + built-in Serial–MQTT Bridge)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "4.0"
+#define FW_VERSION "4.1"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -115,6 +115,7 @@ volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
 unsigned long lastPacketTime = 0;
 uint32_t transponderTimeout = 5000;
 bool oneWayRFMode = false;   // when true: no ESP-NOW pong; reply via JSON on Serial (for Serial-MQTT bridge to cloud)
+bool transponderHuntOnTimeout = false;   // when true: cycle channel/mode after timeouts to find master (lab use); OFF by default to avoid link de-sync in open-air / lossy links
 #define TRANSPONDER_CYCLE_AFTER_TIMEOUTS 3   // require this many consecutive timeouts before hunting (avoids cycling on brief fades)
 uint32_t transponderConsecutiveTimeouts = 0;
 uint32_t lastReceivedNonce = 0;   // for gap detection: transponder reports missed packets when nonce is not consecutive 
@@ -546,7 +547,8 @@ void printDetailedStatus() {
         { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL   : Throttled (actual %.1f dBm)\n", a); else Serial.println("  THERMAL   : OK"); }
         Serial.printf("  RF CHANNEL: %u (follows master)\n", wifiChannel);
         Serial.printf("  1-WAY RF  : %s (reply via JSON on Serial; no ESP-NOW pong)\n", oneWayRFMode ? "ON" : "OFF");
-        Serial.printf("  TIMEOUT   : %u ms (cycle RF mode if no ping)\n", transponderTimeout);
+        Serial.printf("  TIMEOUT   : %u ms\n", transponderTimeout);
+        Serial.printf("  HUNT ON TIMEOUT : %s (cycle channel/mode if no ping; [H] toggle; OFF = stay on channel for open-air)\n", transponderHuntOnTimeout ? "ON" : "OFF");
         Serial.printf("  CSV LOG   : %s (master→TX reception)\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX   : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.printf("  MAC ADDR   : %s\n", WiFi.macAddress().c_str());
@@ -554,6 +556,7 @@ void printDetailedStatus() {
         Serial.println("  (RX lines: timestamp | N | Mstr MAC | mode | RSSI | Mstr Pwr | Path Loss | TX Pwr)");
         Serial.println("--------------------------------------------------");
         Serial.println("  [W] 1-way RF      : Reply via JSON on Serial (no pong); for Serial-MQTT bridge to cloud");
+        Serial.println("  [H] Hunt on timeout: Toggle cycle channel/mode when no ping (OFF by default; use for lab)");
         Serial.println("  [0] Force STD     : Set RF to 802.11b and restart (resync with master)");
         Serial.printf("  [f] CSV file log  : Toggle logging to %s (SPIFFS)\n", CSV_PATH);
         Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
@@ -590,6 +593,10 @@ void setup() {
         // Master always boots on channel 1 (like transponder); channel still saved to NVS when user sets via 'n'
         prefs.end();
         minuteTimer = millis();
+    } else {
+        prefs.begin("probe", true);
+        transponderHuntOnTimeout = prefs.getBool("huntT", false);   // default OFF for open-air / lossy links
+        prefs.end();
     }
     
     applyRFSettings(currentRFMode);
@@ -779,6 +786,11 @@ void loop() {
                         if (Serial) Serial.println(">> 1-way RF mode OFF: Serial restored, replying with pong over ESP-NOW.");
                     }
                     break;
+                case 'H':
+                    transponderHuntOnTimeout = !transponderHuntOnTimeout;
+                    prefs.begin("probe", false); prefs.putBool("huntT", transponderHuntOnTimeout); prefs.end();
+                    if (Serial) Serial.printf(">> Hunt on timeout: %s (transponder %s cycle channel/mode when no ping)\n", transponderHuntOnTimeout ? "ON" : "OFF", transponderHuntOnTimeout ? "will" : "will not");
+                    break;
                 case '0':
                     currentRFMode = MODE_STD;
                     prefs.begin("probe", false); prefs.putUChar("rfm", currentRFMode); prefs.end();
@@ -793,10 +805,12 @@ void loop() {
         }
         if (millis() - lastPacketTime > transponderTimeout) { 
             lastPacketTime = millis(); 
-            transponderConsecutiveTimeouts++;
-            if (transponderConsecutiveTimeouts >= TRANSPONDER_CYCLE_AFTER_TIMEOUTS) {
-                transponderConsecutiveTimeouts = 0;
-                cycleTransponderProtocol(); 
+            if (transponderHuntOnTimeout) {
+                transponderConsecutiveTimeouts++;
+                if (transponderConsecutiveTimeouts >= TRANSPONDER_CYCLE_AFTER_TIMEOUTS) {
+                    transponderConsecutiveTimeouts = 0;
+                    cycleTransponderProtocol(); 
+                }
             }
         }
         if (ledTimer != 0 && millis() >= ledTimer) { digitalWrite(ledPin, LOW); ledTimer = 0; }
