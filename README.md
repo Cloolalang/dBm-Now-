@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v4.5)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v5.0)
 
 ## Table of contents
 
@@ -116,7 +116,7 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 | 2. **Install ESP32 core** | Tools → Board → Boards Manager → search **"esp32"** → Install **"esp32 by Espressif Systems"** |
 | 3. **Board** | Tools → Board → **ESP32 Arduino** → **ESP32 Dev Module** (or your board) |
 | 4. **Port** | Tools → Port → select COM port for the plugged-in ESP32 |
-| 5. **Open sketch** | Open `sketch_jan4b/sketch_jan4b.ino` (folder must be `sketch_jan4b`; contains `bridge_mode.ino` — both compile) |
+| 5. **Open sketch** | Open `dBmNow/dBmNow.ino` (folder must be `dBmNow`; contains `bridge_mode.ino` — both compile) |
 | 6. **Upload** | Same sketch for all devices. Set GPIO 12/13 for role after upload (see [Quick start](#quick-start)). |
 
 ---
@@ -257,7 +257,7 @@ Enable with **`W`** on transponder or master. Transponder switches Serial to **9
 | **temp** | Transponder chip temp (°C; -999 if unsupported) |
 | **z** | Master zeroed: delta from reference RSSI (0 if not calibrated). In 1-way mode always **0** (no pongs → no update). |
 | **sym** | Master symmetry: fwdLoss − bwdLoss (0 in 1-way mode). |
-| **plSD** | Master path loss SD (dB) over last 10 forward path losses (0 in 1-way mode). |
+| **plSD** | Path loss SD (dB): in 1-way mode computed on the **transponder** (SD of last 10 path losses) so it **updates** on MQTT; in 2-way the master sends it (0 when master has no pongs). |
 
 **Interpretation**
 
@@ -265,7 +265,7 @@ Enable with **`W`** on transponder or master. Transponder switches Serial to **9
 |--------|---------|
 | **Zeroed (z)** | Master sets reference RSSI on first pong (or `z`). **z** = current backward RSSI − reference. Track change from baseline (drift, cable/antenna, movement). |
 | **Symmetry (sym)** | sym ≠ 0 = one direction worse — often one receiver has interference or higher noise. **Positive** → transponder impaired; **Negative** → master impaired. |
-| **Path loss SD (plSD)** | **plSD** > ~3 dB suggests one or both devices mobile or near moving objects (RF fading). |
+| **Path loss SD (plSD)** | In 1-way mode the **transponder** computes plSD (SD of last 10 path losses) so it **updates** on MQTT. **z** and **sym** stay 0 in 1-way (no pong data). **plSD** > ~3 dB suggests one or both devices mobile or near moving objects (RF fading). |
 
 LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 
@@ -310,7 +310,7 @@ LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 | **Role** | GPIO 13 = GND → **Master**; GPIO 13 floating → **Transponder**. |
 | **RF** | STD or Long Range 250k/500k; channel 1–14. Boot: channel 1, standard rate. **`n`** = channel, **`l`** = cycle mode. |
 | **Serial** | 115200 (or `SERIAL_BAUD`) on Master. **`h`** = full status (MAC, ESP-NOW mode). |
-| **Build** | Arduino IDE: open `sketch_jan4b.ino`, Upload. **Flash all 3:** [Arduino CLI](https://arduino.github.io/arduino-cli/) + **`.\flash_all.ps1`** (edit COM ports in script). |
+| **Build** | Arduino IDE: open `dBmNow.ino`, Upload. **Flash all 3:** [Arduino CLI](https://arduino.github.io/arduino-cli/) + **`.\flash_all.ps1`** (edit COM ports in script). |
 
 ---
 

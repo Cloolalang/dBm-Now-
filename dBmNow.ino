@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v4.5 (1-way RF + built-in Serial–MQTT Bridge)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v5.0 (1-way RF + built-in Serial–MQTT Bridge)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "4.5"
+#define FW_VERSION "5.0"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -132,6 +132,12 @@ uint32_t lastReceivedNonce = 0;   // for gap detection: transponder reports miss
 uint8_t oneWayMissedHistory[MISSED_HISTORY_LEN];
 uint8_t oneWayMissedIdx = 0;
 uint8_t oneWayMissedCount = 0;   // 0..MISSED_HISTORY_LEN
+// Transponder path loss SD (last 10 pl values) so plSD updates in 1-way JSON/MQTT
+#define ONE_WAY_PL_HISTORY_LEN 10
+float oneWayPathLossHistory[ONE_WAY_PL_HISTORY_LEN];
+uint8_t oneWayPathLossIdx = 0;
+uint8_t oneWayPathLossCount = 0;
+float oneWayPathLossSD = 0.0f;
 
 enum LEDState { IDLE, TX_FLASH, GAP, RX_FLASH };
 LEDState currentLEDState = IDLE;
@@ -490,14 +496,33 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             }
             uint8_t linkPct = (n > 0) ? (uint8_t)(100u - (countWithLoss * 100u) / (uint32_t)n) : 100;
             float lavg = (n > 0) ? (float)sumMissed / (float)n : 0.0f;
+            // Transponder path loss SD (last 10 pl) so plSD updates in 1-way JSON/MQTT (master sends 0 in 1-way)
+            oneWayPathLossHistory[oneWayPathLossIdx] = pathLoss;
+            oneWayPathLossIdx = (oneWayPathLossIdx + 1) % ONE_WAY_PL_HISTORY_LEN;
+            if (oneWayPathLossCount < ONE_WAY_PL_HISTORY_LEN) oneWayPathLossCount++;
+            uint8_t plN = oneWayPathLossCount;
+            float plSum = 0.0f;
+            for (uint8_t i = 0; i < plN; i++) {
+                uint8_t j = (plN == ONE_WAY_PL_HISTORY_LEN) ? (uint8_t)((oneWayPathLossIdx + i) % ONE_WAY_PL_HISTORY_LEN) : i;
+                plSum += oneWayPathLossHistory[j];
+            }
+            float plMean = (plN > 0) ? plSum / (float)plN : 0.0f;
+            float plVar = 0.0f;
+            for (uint8_t i = 0; i < plN; i++) {
+                uint8_t j = (plN == ONE_WAY_PL_HISTORY_LEN) ? (uint8_t)((oneWayPathLossIdx + i) % ONE_WAY_PL_HISTORY_LEN) : i;
+                float d = oneWayPathLossHistory[j] - plMean;
+                plVar += d * d;
+            }
+            oneWayPathLossSD = (plN > 1) ? sqrtf(plVar / (float)(plN - 1)) : 0.0f;
             float chipTemp = getChipTempC();
             char tsBuf[10];
             snprintf(tsBuf, sizeof(tsBuf), "%02d:%02d:%02d", rxData.hour, rxData.minute, rxData.second);
-            float zVal = (len >= (int)sizeof(Payload)) ? rxData.zeroed : 0.0f;   // Z from master (0 if old payload)
-            float symVal = (len >= (int)sizeof(Payload)) ? rxData.symmetry : 0.0f;   // symmetry from master (0 if old payload)
-            float plSDVal = (len >= (int)sizeof(Payload)) ? rxData.pathLossSD : 0.0f;   // path loss SD from master (0 if old payload)
+            float zVal = (len >= (int)sizeof(Payload)) ? rxData.zeroed : 0.0f;   // Z from master (0 in 1-way; no pongs)
+            float symVal = (len >= (int)sizeof(Payload)) ? rxData.symmetry : 0.0f;   // symmetry from master (0 in 1-way)
+            // plSD: transponder-computed (updates in 1-way); master sends 0 in 1-way so we use oneWayPathLossSD
+            float plSDOut = oneWayPathLossSD;
             if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"missed\":%u,\"linkPct\":%u,\"lavg\":%.1f,\"temp\":%.1f,\"z\":%.1f,\"sym\":%.1f,\"plSD\":%.1f}\n",
-                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, symVal, plSDVal);
+                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, symVal, plSDOut);
         } else {
             if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
                 getFastTimestamp().c_str(), rxData.nonce,
