@@ -12,6 +12,7 @@
 - [Default settings on first run](#default-settings-on-first-run) — Master, Transponder, Bridge
 - [Links](#links) — Android apps, ESP-NOW docs
 - [Planned features](#planned-features)
+- [Follow-on project ideas](#follow-on-project-ideas)
 - [Legal and compliance](#legal-and-compliance)
 - [License](#license)
 
@@ -397,6 +398,16 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 - **Real-time clock** -- Hardware RTC (e.g. external RTC module or battery-backed RTC) for accurate timestamps across power cycles and when WiFi sync is not available.
 - **Hardware design with rechargeable battery** -- Reference or suggested hardware design for a battery-powered unit with rechargeable battery and charging circuitry.
 - **SD card** -- Hardware and firmware support for recording results to SD card (e.g. in addition to or instead of SPIFFS).
+
+---
+
+## Follow-on project ideas
+
+Ideas for projects that build on or extend this firmware:
+
+1. **Crude movement detector / room radar** — Use the path-loss SD (plSD) measurement: when someone moves in the room, multipath and shadowing change, so plSD (or RSSI variance) increases; a simple threshold on plSD can act as a presence/movement detector without dedicated radar hardware.
+2. **Low-cost outdoor antenna test range (2.4 GHz)** — Use master and transponder with known separation (e.g. 10 m, 50 m) and fixed mounts to compare antennas, cables, and enclosures; path loss and symmetry give repeatable figures for A/B testing without a proper anechoic chamber.
+3. **DAS uplink test system** — Master at the test point (e.g. remote antenna unit or coverage area), transponder at the head end; 1-way JSON over MQTT gives live uplink path loss and RSSI for DAS / RF-over-fibre commissioning and monitoring.
 
 ---
 
