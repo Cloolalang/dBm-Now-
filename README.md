@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v5.0)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v5.5)
 
 ## Table of contents
 
@@ -239,10 +239,10 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 
 ### 5. 1-way RF mode
 
-Enable with **`W`** on transponder or master. Transponder switches Serial to **9600 baud** (for Serial–MQTT bridges); prints **one JSON object per line** (no other output). Turn OFF with **`W`** again to restore pong over ESP-NOW. **1-way mode is stored in NVS** (Preferences); after a power cycle the transponder comes back up in 1-way mode with Serial at 9600 so no re-configuration is needed.
+Enable with **`W`** on transponder or master. Transponder switches Serial to **9600 baud** (for Serial–MQTT bridges); prints **one JSON object per line** (no other output). Turn OFF with **`W`** again to restore pong over ESP-NOW. **1-way mode is stored in NVS** (Preferences) on both devices: after a power cycle the **transponder** comes back up in 1-way mode with Serial at 9600, and the **master** restores its last 1-way request state (so if the master was in 1-way mode when power-cycled, it boots requesting 1-way again). When **no packet is received when expected**, the transponder sends JSON with **rssi:-127, pl:-127** at the **same rate** as the master was sending (transponder stores the master ping interval from the payload). Before the first packet, it sends every 10 s. So MQTT keeps getting messages at the last rate when out of range.
 
-**Example:**  
-`{"pl":45.2,"rssi":-72,"mp":14,"tp":14,"n":1234,"ch":6,"m":"STD","ts":"12:34:56","missed":0,"linkPct":100,"lavg":0.0,"temp":42.5,"z":0.0,"plSD":0.8}`
+**Example (packet JSON):**  
+`{"pl":45.2,"rssi":-72,"mp":14,"tp":14,"n":1234,"ch":6,"m":"STD","ts":"12:34:56","missed":0,"linkPct":100,"lavg":0.0,"temp":42.5,"z":0.0,"plSD":0.8,"interval_ms":1000}`
 
 **1-way JSON fields**
 
@@ -257,6 +257,9 @@ Enable with **`W`** on transponder or master. Transponder switches Serial to **9
 | **temp** | Transponder chip temp (°C; -999 if unsupported) |
 | **z** | In 1-way mode: **transponder-computed** (RSSI − reference from first ping in 1-way) so **z updates** on MQTT. In 2-way: master zeroed (delta from ref RSSI). |
 | **plSD** | Path loss SD (dB): in 1-way mode computed on the **transponder** (SD of last 10 path losses) so it **updates** on MQTT; in 2-way the master sends it (0 when master has no pongs). |
+| **interval_ms** | Master ping interval (ms) from payload; transponder stores this and sends missed JSON at this rate when no packet received. |
+
+**Missed packet (rssi/pl -127):** The transponder stores the **master ping interval** from each received packet. When a packet is **not received when expected** (same interval + small jitter tolerance), it sends one JSON line with **rssi:-127, pl:-127** and **hb:1** at the **same rate** as the master was sending (e.g. 1/s if master was 1/s). **Before the first packet**, it sends every **10 s**. Example: `{"hb":1,"rssi":-127,"pl":-127,"ch":6,"m":"STD","ts":"12:34:56","temp":42.5,"lastN":1234,"hunt":0,"tp":14.0,"oneWay":1,"interval_ms":1000}`. **interval_ms** = stored master interval (or 10000 before first packet). Bridge publishes to the configured topic so MQTT keeps getting messages at the last rate when out of range.
 
 **Interpretation**
 
@@ -377,6 +380,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 
 - **Commands via MQTT** — Allow sending some commands to the device over MQTT (e.g. set channel, toggle 1-way RF, start/stop logging) so the master or transponder can be controlled from the cloud or from an app.
+- **Transponder command acknowledgment** — The pong already carries the transponder’s current channel, rfMode, and txPower. Add on the master: (1) show transponder-reported channel and mode (e.g. in the status line or “TX ch X mode Y”) so the user can see what the transponder says it’s using; (2) when the master has sent a channel or RF-mode change, verify pong.channel / pong.rfMode against what was requested and print a confirmation or mismatch warning (e.g. “>> Transponder confirmed ch X” or “>> Transponder reports ch X (expected Y)”).
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
@@ -406,7 +410,7 @@ This project was developed using [Cursor](https://cursor.com/) (AI-assisted IDE)
 
 Use of this firmware in devices that transmit in the 2.4 GHz band may be subject to local regulations (FCC, CE, radio licensing). You are responsible for compliance; avoid causing interference to other users.
 
-**External antennas:** Limits are usually expressed as **EIRP**.
+**External antennas:** Limits are usually expressed as **EIRP**, which applies to **transmit** and **transceive** antennas only. In a dual-antenna system with a GPIO-controlled switch, a separate high-gain **receive** antenna could be used without counting toward EIRP limits.
 
 | Term | Formula / note |
 |------|-----------------|
@@ -418,7 +422,7 @@ Use of this firmware in devices that transmit in the 2.4 GHz band may be subject
 
 In some regions (e.g. EU under ETSI EN 300 328), non-adaptive 2.4 GHz use may be subject to **duty cycle / medium-utilisation limits**. Choose ping interval (`r`) and TX power accordingly.
 
-**UK:** 2.4 GHz licence-exempt use is governed by **Ofcom** and **UK IR2030**. Comply with IR2030 and **ETSI EN 300 328**. Operation is non-protected, non-interference. See [Ofcom licence-exempt devices](https://www.ofcom.org.uk/spectrum/radio-equipment/licence-exempt-devices) and [IR2030](https://www.ofcom.org.uk/spectrum/radio-equipment/regulations-technical-reference).
+**UK:** 2.4 GHz licence-exempt use is governed by **Ofcom** and **UK IR2030**. Comply with IR2030 and **ETSI EN 300 328**. Operation is non-protected, non-interference. See [Ofcom licence-exempt devices](https://www.ofcom.org.uk/spectrum/radio-equipment/licence-exempt-devices) and [IR2030](https://www.ofcom.org.uk/spectrum/radio-equipment/regulations-technical-reference). In the UK (and EU) only **channels 1–13** are allowed for **radiated** use; **channel 14** is not permitted over the air. For **conducted / cabled use only** (e.g. RF in cables, no antenna, or screened environment), use of channel 14 is generally acceptable because restrictions apply to radiated emissions; confirm with IR2030 and your compliance advisor if in doubt.
 
 ### Radio amateurs
 

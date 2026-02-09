@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v5.0 (1-way RF + built-in Serial–MQTT Bridge)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v5.5 (1-way RF + built-in Serial–MQTT Bridge)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "5.0"
+#define FW_VERSION "5.5"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -141,6 +141,13 @@ float oneWayPathLossSD = 0.0f;
 // Transponder zeroed (z): reference RSSI from first ping in 1-way so z updates in 1-way JSON/MQTT
 float oneWayRefRSSI = 0.0f;
 bool oneWayRefSet = false;
+#define ONE_WAY_HEARTBEAT_MS 10000   // before first packet: send missed JSON every 10 s
+unsigned long lastOneWayHeartbeatMs = 0;
+// Transponder: measure master ping interval and send JSON with rssi/pl -127 when packet missed at expected time
+uint32_t oneWayLastPingIntervalMs = 1000;       // from master payload when we receive; default 1 s
+unsigned long oneWayExpectedNextPacketMs = 0;   // when we expect next packet (0 = before first packet)
+#define ONE_WAY_MISSED_TOLERANCE_MIN_MS 500      // only treat as missed after expected time + this (avoid false -127 when packets are late)
+#define ONE_WAY_MISSED_TOLERANCE_MAX_MS 5000    // cap so we don't wait too long for long intervals
 
 enum LEDState { IDLE, TX_FLASH, GAP, RX_FLASH };
 LEDState currentLEDState = IDLE;
@@ -528,8 +535,11 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             float chipTemp = getChipTempC();
             char tsBuf[10];
             snprintf(tsBuf, sizeof(tsBuf), "%02d:%02d:%02d", rxData.hour, rxData.minute, rxData.second);
-            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"missed\":%u,\"linkPct\":%u,\"lavg\":%.1f,\"temp\":%.1f,\"z\":%.1f,\"plSD\":%.1f}\n",
-                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, plSDOut);
+            // Store master ping interval so we send missed JSON at same rate when no packet
+            if (rxData.pingInterval >= 100 && rxData.pingInterval <= 60000) oneWayLastPingIntervalMs = rxData.pingInterval;
+            oneWayExpectedNextPacketMs = millis() + oneWayLastPingIntervalMs;
+            if (Serial) Serial.printf("{\"pl\":%.1f,\"rssi\":%.0f,\"mp\":%.1f,\"tp\":%.1f,\"n\":%u,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"missed\":%u,\"linkPct\":%u,\"lavg\":%.1f,\"temp\":%.1f,\"z\":%.1f,\"plSD\":%.1f,\"interval_ms\":%lu}\n",
+                pathLoss, rssi, rxData.txPower, currentPower, (unsigned)rxData.nonce, (unsigned)wifiChannel, rfModeStr, tsBuf, (unsigned)missedCount, linkPct, lavg, chipTemp, zVal, plSDOut, (unsigned long)oneWayLastPingIntervalMs);
         } else {
             if (Serial) Serial.printf("[%s] RX N=%u | Mstr %02x:%02x:%02x:%02x:%02x:%02x | %s | RSSI:%.0f dBm | Mstr Pwr:%.1f dBm | Path Loss:%.1f dB | TX Pwr:%.1f dBm\n",
                 getFastTimestamp().c_str(), rxData.nonce,
@@ -673,9 +683,9 @@ void setup() {
     // Disable WiFi modem sleep for consistent ping/pong latency (use WIFI_PS_MIN_MODEM for battery if needed)
     esp_wifi_set_ps(WIFI_PS_NONE);
     if (isMaster) {
-        prefs.begin("probe", true); 
+        prefs.begin("probe", true);
         currentRFMode = MODE_STD;   // always boot on standard rate for quick sync (not LR)
-        // Master always boots on channel 1 (like transponder); channel still saved to NVS when user sets via 'n'
+        requestOneWayRF = prefs.getBool("oneWayReq", false);   // restore 1-way request after power cycle
         prefs.end();
         minuteTimer = millis();
     } else {
@@ -743,6 +753,7 @@ void loop() {
                     case 'W':
                     case 'w':
                         requestOneWayRF = !requestOneWayRF;
+                        prefs.begin("probe", false); prefs.putBool("oneWayReq", requestOneWayRF); prefs.end();   // persist for power cycle
                         if (!plotMode) Serial.println(requestOneWayRF ? ">> 1-way RF requested: transponder will reply via JSON on Serial (no pong). Next pings send request." : ">> 1-way RF off: transponder will reply with pong over ESP-NOW.");
                         break;
                     case 'p': setPower(val); break;
@@ -865,6 +876,38 @@ void loop() {
         }
         }
     } else {
+        // 1-way mode: when packet expected but not received, send JSON with rssi/pl -127 at same rate as master was sending
+        if (oneWayRFMode) {
+            if (oneWayExpectedNextPacketMs == 0) {
+                // Before first packet: send missed JSON every 10 s so MQTT still gets messages
+                if (millis() - lastOneWayHeartbeatMs >= (unsigned long)ONE_WAY_HEARTBEAT_MS) {
+                    lastOneWayHeartbeatMs = millis();
+                    const char* rfModeStr = (currentRFMode == MODE_STD) ? "STD" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
+                    float chipTemp = getChipTempC();
+                    String tsStr = getFastTimestamp();
+                    if (Serial) Serial.printf("{\"hb\":1,\"rssi\":-127,\"pl\":-127,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"temp\":%.1f,\"lastN\":%lu,\"hunt\":%u,\"tp\":%.1f,\"oneWay\":1,\"interval_ms\":%lu}\n",
+                        (unsigned)wifiChannel, rfModeStr, tsStr.c_str(), chipTemp, (unsigned long)lastReceivedNonce,
+                        transponderHuntOnTimeout ? 1u : 0u, (double)currentPower, (unsigned long)ONE_WAY_HEARTBEAT_MS);
+                }
+            } else {
+                // Only treat as missed when we're past expected time + tolerance (avoid false -127 when packets arrive with normal jitter)
+                // Must check millis() >= oneWayExpectedNextPacketMs first: else (millis()-expected) underflows when expected is in future and we spam -127
+                uint32_t tolerance = oneWayLastPingIntervalMs / 2;
+                if (tolerance < ONE_WAY_MISSED_TOLERANCE_MIN_MS) tolerance = ONE_WAY_MISSED_TOLERANCE_MIN_MS;
+                if (tolerance > ONE_WAY_MISSED_TOLERANCE_MAX_MS) tolerance = ONE_WAY_MISSED_TOLERANCE_MAX_MS;
+                unsigned long now = millis();
+                if (now >= oneWayExpectedNextPacketMs && (now - oneWayExpectedNextPacketMs) >= tolerance) {
+                    // Packet expected but not received: send missed JSON at same rate as master
+                    oneWayExpectedNextPacketMs = millis() + oneWayLastPingIntervalMs;
+                const char* rfModeStr = (currentRFMode == MODE_STD) ? "STD" : (currentRFMode == MODE_LR_250K) ? "LR 250k" : "LR 500k";
+                float chipTemp = getChipTempC();
+                String tsStr = getFastTimestamp();
+                if (Serial) Serial.printf("{\"hb\":1,\"rssi\":-127,\"pl\":-127,\"ch\":%u,\"m\":\"%s\",\"ts\":\"%s\",\"temp\":%.1f,\"lastN\":%lu,\"hunt\":%u,\"tp\":%.1f,\"oneWay\":1,\"interval_ms\":%lu}\n",
+                    (unsigned)wifiChannel, rfModeStr, tsStr.c_str(), chipTemp, (unsigned long)lastReceivedNonce,
+                    transponderHuntOnTimeout ? 1u : 0u, (double)currentPower, (unsigned long)oneWayLastPingIntervalMs);
+                }
+            }
+        }
         if (Serial.available() > 0) {
             char cmd = Serial.read();
             if (cmd == 'm') {
