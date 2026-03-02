@@ -372,6 +372,8 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 | Resource | Description |
 |----------|-------------|
+| **[Arduino](https://www.arduino.cc/)** | Arduino IDE and documentation. |
+| **[MQTT Explorer](http://mqtt-explorer.com/)** | Desktop MQTT client for debugging and inspecting bridge topics. |
 | **[IoT MQTT Panel](https://play.google.com/store/apps/details?id=com.iot.mqtt.panel)** (Android) | MQTT client for 1-way path loss, RSSI, etc. with cloud Mosquitto + bridge. |
 | **[Serial USB Terminal](https://play.google.com/store/apps/details?id=de.kai_morich.serial_usb_terminal)** (Android) | Serial over USB OTG; tested with master at max TX (v1.57). |
 | **[ESP-NOW source](https://github.com/espressif/esp-now)** | Official ESP-NOW component and examples. |
@@ -382,8 +384,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 ## Planned features
 
-
-
+- **Audio indicator on the master for indicating replies** — An audible cue (e.g. beep or tone) on the master when a pong is received, to improve awareness during link testing and walk-test coordination.
 - **Commands via MQTT** — Allow sending some commands to the device over MQTT (e.g. set channel, toggle 1-way RF, start/stop logging) so the master or transponder can be controlled from the cloud or from an app.
 - **Transponder command acknowledgment** — The pong already carries the transponder’s current channel, rfMode, and txPower. Add on the master: (1) show transponder-reported channel and mode (e.g. in the status line or “TX ch X mode Y”) so the user can see what the transponder says it’s using; (2) when the master has sent a channel or RF-mode change, verify pong.channel / pong.rfMode against what was requested and print a confirmation or mismatch warning (e.g. “>> Transponder confirmed ch X” or “>> Transponder reports ch X (expected Y)”).
 - **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
@@ -441,7 +442,7 @@ In some regions (e.g. EU under ETSI EN 300 328), non-adaptive 2.4 GHz use may be
 
 ### Radio amateurs
 
-Licensed amateurs may have higher power privileges on 2.4 GHz (e.g. FCC Part 97) when operating in the amateur service. The ESP32 is limited to ~20 dBm; for higher power use an external PA and comply with national amateur regulations.
+Licensed amateurs may have higher power privileges on 2.4 GHz (e.g. FCC Part 97) when operating in the amateur service. The ESP32 is limited to ~20 dBm; for higher power use an external PA and comply with national amateur regulations. Amateurs may also use high-gain antennas where permitted under national rules (EIRP limits and band plans apply).
 
 ---
 
