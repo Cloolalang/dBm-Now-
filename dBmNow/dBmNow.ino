@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v5.5 (1-way RF + built-in Serial–MQTT Bridge)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v5.6 (1-way RF + built-in Serial–MQTT Bridge)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "5.5"
+#define FW_VERSION "5.6"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -166,14 +166,15 @@ typedef struct {
     float zeroed;         // master: Z = (lastKnownRSSI - referenceRSSI) when calibrated; sent so transponder can include in 1-way JSON
     float symmetry;      // master: fwdLoss - bwdLoss from last pong; sent so transponder can include in 1-way JSON
     float pathLossSD;    // master: SD of last 10 forward path losses; sent so transponder can include in 1-way JSON
+    uint8_t csvLog;      // master→transponder: 1 = master CSV logging ON (transponder mirrors to /log.csv)
 } Payload;
 Payload myData, txData, rxData;
 
 // Forward declarations (needed when built as C++ e.g. PlatformIO; Arduino .ino ignores)
 void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int len);
 void handleLED();
-void csvLogStart();
-void csvLogStop();
+void csvLogStart(bool quiet = false);
+void csvLogStop(bool quiet = false);
 void csvLogDump();
 void csvLogErase();
 void promiscuousRx(void *buf, wifi_promiscuous_pkt_type_t type);
@@ -255,15 +256,15 @@ void setPower(float pwr) {
     delay(20);
 }
 
-void csvLogStart() {
+void csvLogStart(bool quiet) {
     if (csvFileLogging) return;
     if (!SPIFFS.begin(true)) {
-        Serial.println(">> CSV: SPIFFS mount failed.");
+        if (!quiet) Serial.println(">> CSV: SPIFFS mount failed.");
         return;
     }
     csvFile = SPIFFS.open(CSV_PATH, "a");
     if (!csvFile) {
-        Serial.println(">> CSV: open failed.");
+        if (!quiet) Serial.println(">> CSV: open failed.");
         return;
     }
     if (csvFile.size() == 0) {
@@ -275,16 +276,18 @@ void csvLogStart() {
     csvFile.flush();
     csvFileLogging = true;
     csvLogStartTime = millis();
-    Serial.printf(">> CSV logging ON -> %s", CSV_PATH);
-    if (maxRecordingTimeSec > 0) Serial.printf(" (max %u s)", maxRecordingTimeSec);
-    Serial.println();
+    if (!quiet) {
+        Serial.printf(">> CSV logging ON -> %s", CSV_PATH);
+        if (maxRecordingTimeSec > 0) Serial.printf(" (max %u s)", maxRecordingTimeSec);
+        Serial.println();
+    }
 }
 
-void csvLogStop() {
+void csvLogStop(bool quiet) {
     if (!csvFileLogging) return;
     csvFile.close();
     csvFileLogging = false;
-    Serial.println(">> CSV logging OFF.");
+    if (!quiet) Serial.println(">> CSV logging OFF.");
 }
 
 void csvLogDump() {
@@ -460,9 +463,15 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         else {
             memcpy(&rxData, incoming, (size_t)len);
             rxData.missedCount = 0;   // old 25-byte payload
-            if (len < (int)sizeof(Payload)) rxData.oneWayRF = 0;   // old payload: no oneWayRF field
+            if (len < (int)sizeof(Payload)) {
+                rxData.oneWayRF = 0;   // old payload: no oneWayRF field
+                rxData.csvLog = 0;     // old payload: no master CSV sync
+            }
         }
         if (len >= (int)sizeof(Payload)) {
+            bool wantLog = (rxData.csvLog != 0);
+            if (wantLog && !csvFileLogging) csvLogStart(true);
+            else if (!wantLog && csvFileLogging) csvLogStop(true);
             if (rxData.oneWayRF != 0) {
                 if (!oneWayRFMode) {
                     oneWayRFMode = true;
@@ -615,7 +624,7 @@ void printDetailedStatus() {
         Serial.printf("  1-WAY RF    : %s (request transponder reply via JSON on Serial, no pong)\n", requestOneWayRF ? "REQUESTED" : "OFF");
         { float t = getChipTempC(); if (t > -100.0f) Serial.printf("  CHIP TEMP   : %.1f C\n", t); else Serial.println("  CHIP TEMP   : N/A"); }
         { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL     : Throttled (actual %.1f dBm, requested %.1f dBm)\n", a, currentPower); else Serial.println("  THERMAL     : OK"); }
-        Serial.printf("  CSV LOG     : %s\n", csvFileLogging ? "ON" : "OFF");
+        Serial.printf("  CSV LOG     : %s (transponder mirrors via ping when linked)\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX    : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.println("--------------------------------------------------");
         Serial.println("  [l] Toggle Mode    : Cycle STD -> 250k -> 500k");
@@ -644,7 +653,7 @@ void printDetailedStatus() {
         Serial.printf("  1-WAY RF  : %s (reply via JSON on Serial; no ESP-NOW pong)\n", oneWayRFMode ? "ON" : "OFF");
         Serial.printf("  TIMEOUT   : %u ms\n", transponderTimeout);
         Serial.printf("  HUNT ON TIMEOUT : %s (cycle channel/mode if no ping; [H] toggle; OFF = stay on channel for open-air)\n", transponderHuntOnTimeout ? "ON" : "OFF");
-        Serial.printf("  CSV LOG   : %s (master→TX reception)\n", csvFileLogging ? "ON" : "OFF");
+        Serial.printf("  CSV LOG   : %s (mirrors master [f] over RF; local [f] until next ping)\n", csvFileLogging ? "ON" : "OFF");
         Serial.printf("  CSV MAX   : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.printf("  MAC ADDR   : %s\n", WiFi.macAddress().c_str());
         Serial.printf("  ESP-NOW    : RX: broadcast, TX: unicast\n");
@@ -850,6 +859,7 @@ void loop() {
                 myData.symmetry = lastSymmetry;   // fwdLoss - bwdLoss from last pong
                 myData.pathLossSD = lastPathLossSD;   // SD of last 10 forward path losses for 1-way JSON
             }
+            myData.csvLog = csvFileLogging ? 1 : 0;   // transponder mirrors CSV logging to SPIFFS
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;

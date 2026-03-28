@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v5.5)
+# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v5.6)
 
 ## Table of contents
 
@@ -39,7 +39,7 @@ ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pin
 
 **PHY and band:** Operates in the **2.4 GHz ISM band** on a single **20 MHz** channel (1–14). Standard mode uses **802.11 b/g/n** (DSSS for 11b, OFDM for 11g/n); default PHY rate is **1 Mbps**. Optional **Long Range (LR)** mode uses Espressif’s proprietary LR modulation (e.g. 250 or 500 kbps) for better sensitivity and range at lower throughput.
 
-**On-air time (basic ESP-NOW packet):** At **1 Mbps** (standard mode), a typical frame is PLCP preamble (~120 µs for 802.11b short) + PLCP header + 802.11/ESP-NOW MAC and headers (~52 bytes) + payload + FCS. For a **25-byte payload**, total air time is about **0.5–0.6 ms** per packet; for a 250-byte payload, roughly **2–2.5 ms**. In **unicast**, the receiver sends an 802.11 ACK (~30 µs at 1 Mbps), so total transaction is packet + ACK. **Long Range 250 kbps** has longer symbol times; a 25-byte payload is on the order of **1–2 ms** on air (chip-dependent preamble/header).
+**On-air time (basic ESP-NOW packet):** At **1 Mbps** (standard mode), a typical frame is PLCP preamble (~120 µs for 802.11b short) + PLCP header + 802.11/ESP-NOW MAC and headers (~52 bytes) + payload + FCS. For a **~40-byte** application payload (current `Payload` struct), total air time is still well under **1 ms** per packet at 1 Mbps; for a 250-byte payload, roughly **2–2.5 ms**. In **unicast**, the receiver sends an 802.11 ACK (~30 µs at 1 Mbps), so total transaction is packet + ACK. **Long Range 250 kbps** has longer symbol times; small payloads remain on the order of **1–2 ms** on air (chip-dependent preamble/header).
 
 **Peers and addressing:** Up to **20 peers** per device (e.g. 6 with encryption enabled by default in ESP-IDF). Frames can be sent **unicast** (to a peer MAC) or **broadcast** (e.g. FF:FF:FF:FF:FF:FF). **Unicast** typically uses **802.11 link-layer ACK** (receiver sends an ACK frame); **broadcast** has no link-layer ACK. Applications can add their own request/response or retries.
 
@@ -55,7 +55,7 @@ ESP-NOW based RF link tester using **two ESP32 devices**: a **Master** sends pin
 
 ### This firmware
 
-Uses a **27-byte** payload (compatible with ESP-NOW v1.0 and v2.0; accepts 25–26 byte payloads from older firmware). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
+Uses a **~40-byte** `Payload` struct (compatible with ESP-NOW v1.0 and v2.0; shorter payloads from older firmware are still accepted where the code zero-fills missing fields). Default PHY rate **1 Mbps** (standard mode); **Long Range** 250 kbps and 500 kbps are supported. Encryption is **disabled** (`peerInfo.encrypt = false`).
 
 **RSSI dynamic range:** The reportable RSSI range is roughly **-100 dBm to -30 dBm** (weaker to stronger); **-127** (or sometimes 0) means no signal / invalid. Receiver sensitivity (minimum usable signal) depends on mode: **Long Range 250 kbps** is best (often about -100 to -105 dBm), then **standard 1 Mbps** (about -98 dBm), then LR 500k, then higher 802.11 rates. Usable dynamic range is about **70–75 dB** (sensitivity to saturation). Exact values are chip/board dependent; strong signals can saturate near the upper end. **Initial test findings (ESP32-WROOM):** Measured dynamic range **-15 dBm to -95 dBm** (lowest TX power, all modes STD/LR 250k/LR 500k, ping rate 50 ms). **Expected measurement standard deviation:** In stable conditions (fixed geometry, little multipath), RSSI repeatability is often on the order of **1–3 dB** (σ). With movement, multipath, or changing environment, standard deviation can be **several dB** (e.g. 3–6 dB or more). Averaging over multiple pings or using metal enclosures and fixed antenna positions reduces observed variance.
 
@@ -67,7 +67,7 @@ Uses a **27-byte** payload (compatible with ESP-NOW v1.0 and v2.0; accepts 25–
 
 **MAC / protocol (this firmware):** The link uses **ESP-NOW broadcast mode**. The master sends **one packet per ping** (no retries) to the broadcast address; the transponder sends **one packet in reply**. There is **no link-layer ACK** — if a packet is lost, the master reports *NO REPLY* and continues with the next ping. **Transmit timing** includes 1–17 ms prime jitter (values 1, 2, 3, 5, 7, 11, 13, 17 ms chosen at random) on each ping interval to avoid periodic alignment with WiFi beacons (e.g. 100 ms TU).
 
-**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (27 bytes; 26-byte payloads from older firmware are accepted). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
+**Packet structure:** Both **ping** (Master → Transponder) and **pong** (Transponder → Master) use the same **Payload** struct (current firmware ~40 bytes; shorter payloads from older firmware are accepted with missing fields treated as zero). The over-the-air frame includes 802.11 and ESP-NOW headers before the payload.
 
 | Field | Type | Ping (master sends) | Pong (transponder sends) |
 |-------|------|---------------------|--------------------------|
@@ -82,8 +82,9 @@ Uses a **27-byte** payload (compatible with ESP-NOW v1.0 and v2.0; accepts 25–
 | `missedCount` | uint8_t | 0 (not used) | Number of packets the transponder missed before this nonce (gap in sequence); 0 = none |
 | `oneWayRF` | uint8_t | 0=normal, 1=request transponder **1-way RF** (reply via JSON on Serial only; no pong) | 0 (not used in pong) |
 | `zeroed`, `symmetry`, `pathLossSD` | float | Master: Z (delta from ref RSSI), fwd−bwd symmetry, path loss SD (last 10); for 1-way JSON. In 1-way mode sent as 0. | Transponder echoes in 1-way JSON only |
+| `csvLog` | uint8_t | 1 while master **CSV file logging** is ON (`f`); 0 when OFF — transponder **mirrors** logging to its own `/log.csv` when linked (see **CSV file logging** in §3 Master serial commands) | 0 (not used in pong) |
 
-On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), and **oneWayRF** (1 when master has requested 1-way RF). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), **oneWayRF** (1 when master has requested 1-way RF), and **`csvLog`** (1 when master SPIFFS CSV logging is active). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
 
 ---
 
@@ -222,14 +223,16 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 
 **Maximum range (shoot-out mode):** For the longest radio range, set **Long Range 250 kbps** (**`l`** until you see 250k), **max TX power** on both master (**`p`** + 20 or highest) and transponder (**`t`** + 20 or highest via master target), and a ping interval (**`r`** + value; 10 ms minimum for STD and LR). **Theoretical open-ground range with panel antennas:** Using a simple free-space link budget (e.g. 20 dBm TX, LR 250k receiver sensitivity on the order of −100 dBm, 10–12 dBi gain per side, 15 dB margin for fading/terrain), **theoretical line-of-sight range is on the order of 20–30 km** with directional panels pointed at each other. Real-world open ground will be less due to multipath, ground reflection, and obstacles; actual range depends on antenna gain, feed loss, and local conditions.
 
-**CSV file logging:** **`f`** = start/stop, **`d`** = dump to Serial, **`e`** = erase, **`m`** + seconds = max recording time (0 = no limit). Path: SPIFFS `/log.csv`. Requires SPIFFS partition (default 4MB usually has it).
+**CSV file logging:** **`f`** = start/stop, **`d`** = dump to Serial, **`e`** = erase, **`m`** + seconds = max recording time (0 = no limit). Path: SPIFFS `/log.csv` on **each** ESP32. Requires SPIFFS partition (default 4MB usually has it).
+
+**Master → transponder sync:** When you toggle CSV logging on the **master** with **`f`**, each ping carries a **`csvLog`** flag in the ESP-NOW payload. The **transponder** mirrors that state: it starts or stops writing to its own `/log.csv` on each received ping (no separate Serial command needed on the transponder for a paired session). **Flash the same firmware on both devices** so the payload includes `csvLog`. After you stop logging on the master and connect Serial to the **transponder**, **`d`** will dump the transponder-side log (receive-path columns). If you only toggle **`f`** on the transponder while the master’s logging is **off**, the next ping from the master clears transponder logging (transponder follows the master when linked).
 
 | Where | Columns |
 |-------|---------|
 | **Master** (each pong) | timestamp, nonce, fwdLoss, bwdLoss, symmetry, zeroed, masterRSSI, remoteRSSI, linkPct, lavg, chipTempC, plSD |
 | **Transponder** (each received ping) | timestamp, nonce, rfMode, rssi, masterPwr, pathLoss, transponderPwr |
 
-**Transponder one-way link test:** Start logging on transponder (**`f`**), set **`m`** + seconds if desired, then walk away with the master. Transponder keeps logging every packet it receives (master may show NO REPLY). Return, connect Serial to transponder, **`d`** to dump, copy to PC.
+**Transponder one-way link test:** With the link up, start logging on the **master** (**`f`**) so the transponder mirrors via **`csvLog`**, or start logging on the transponder alone (**`f`**) for a local-only capture; set **`m`** + seconds if desired, then walk away with the master. Transponder keeps logging each received ping (master may show NO REPLY). Return, connect Serial to transponder, **`d`** to dump, copy to PC.
 
 ### 4. Transponder behavior
 
@@ -240,7 +243,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | **`H`** | Toggle **hunt on timeout** (cycle channel/mode when no ping). OFF by default; NVS. |
 | **`0`** | Force RF to STD and restart (resync). |
 | **Serial RX** | Each ping: timestamp, nonce, master MAC, mode, RSSI, path loss, TX Pwr. In 1-way: JSON only (+ LED); no status. |
-| **Sync** | Follows master channel and RF mode from payload; syncs time. Hunt (if ON) cycles channel/mode after timeouts. |
+| **Sync** | Follows master channel and RF mode from payload; syncs time; **CSV logging** follows master **`csvLog`** in ping when payload is full size. Hunt (if ON) cycles channel/mode after timeouts. |
 
 ### 5. 1-way RF mode
 
