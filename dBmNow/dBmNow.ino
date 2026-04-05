@@ -839,7 +839,7 @@ void loop() {
         loopBridge();
         return;
     }
-    if (!promiscuousMode && millis() - lastStatusPrint >= 10000) { lastStatusPrint = millis(); printDetailedStatus(); }
+    if (!promiscuousMode && !masterPaused && millis() - lastStatusPrint >= 10000) { lastStatusPrint = millis(); printDetailedStatus(); }
 
     if (isMaster) {
         if (promiscuousMode) {
@@ -900,7 +900,8 @@ void loop() {
                             waitingForPong = false;
                             Serial.println(">> PAUSED: pings suspended. Press q to resume.");
                         } else {
-                            nextPingTime = millis();   // ping immediately on resume
+                            nextPingTime = millis();      // ping immediately on resume
+                            lastStatusPrint = millis();   // reset auto-status timer so it doesn't fire immediately
                             Serial.println(">> RESUMED: pings restarted.");
                         }
                         break;
