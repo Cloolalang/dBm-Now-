@@ -1,4 +1,4 @@
-﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.1)
+﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.2)
 
 ## Table of contents
 
@@ -204,6 +204,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | `t` + number | Set remote (transponder) target power (dBm), e.g. `t8`. **Valid range:** same as master (-1 to +20 dBm). |
 | `s` | Set remote target power = current master power |
 | `v` | Toggle plot mode (CSV-style output: channel, fwdLoss, bwdLoss, symmetry, zeroed, linkPct, lavg, plSD) |
+| `q` | **Pause / resume** pings (master only) — suspends all TX while paused; all other Serial commands still work. Pausing the master also silences the transponder since it only responds to pings. |
 | `r` + number | Set ping interval (ms), e.g. `r500`. **Valid range:** 10 ms minimum (STD and Long Range); **max** not enforced by firmware (e.g. 100–86400000 ms). LR mode can work at 10 ms. |
 | `h` | Print detailed status |
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |

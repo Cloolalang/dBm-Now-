@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.1 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.2 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "6.1"
+#define FW_VERSION "6.2"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -55,6 +55,7 @@ unsigned long ledTimer = 0;
 
 // Master Specific
 bool plotMode = false, calibrated = false;
+bool masterPaused = false;      // master: when true, pings are suspended (press q to toggle)
 bool requestOneWayRF = false;   // master requests transponder 1-way RF (no pong; reply via JSON on Serial)
 uint32_t burstDelay = 1000, nonceCounter = 0;
 float remoteTargetPower = -1.0, referenceRSSI = 0;
@@ -712,7 +713,7 @@ void printDetailedStatus() {
     if (isMaster) {
         Serial.printf("  MAC ADDR   : %s\n", WiFi.macAddress().c_str());
         Serial.printf("  ESP-NOW    : TX: broadcast, RX: unicast\n");
-        Serial.printf("  LINK STATUS : %s\n", linkCondition.c_str());
+        Serial.printf("  LINK STATUS : %s\n", masterPaused ? "PAUSED (q to resume)" : linkCondition.c_str());
         Serial.printf("  MASTER PWR  : %.1f dBm | REMOTE: %.1f dBm\n", currentPower, remoteTargetPower);
         Serial.printf("  1-WAY RF    : %s (request transponder reply via JSON on Serial, no pong)\n", requestOneWayRF ? "REQUESTED" : "OFF");
         { float t = getChipTempC(); if (t > -100.0f) Serial.printf("  CHIP TEMP   : %.1f C\n", t); else Serial.println("  CHIP TEMP   : N/A"); }
@@ -731,6 +732,7 @@ void printDetailedStatus() {
         Serial.println("  [s] Sync Remote    : Set remote target = current master power");
         Serial.println("  [r] Set Rate       : Ping interval ms (e.g. r1000)");
         Serial.println("  [v] Plotter Mode   : Toggle CSV output");
+        Serial.printf( "  [q] Pause/Resume   : %s pings\n", masterPaused ? "Resume" : "Suspend");
         Serial.println("  [h] Help           : Show this status");
         Serial.println("  [k] Set Time       : HHMM (e.g. k1430)");
         Serial.println("  [z] Zero Cal       : Reset calibration reference");
@@ -876,6 +878,16 @@ void loop() {
                         remoteTargetPower = tClamp;
                         break;
                     }
+                    case 'q':
+                        masterPaused = !masterPaused;
+                        if (masterPaused) {
+                            waitingForPong = false;
+                            Serial.println(">> PAUSED: pings suspended. Press q to resume.");
+                        } else {
+                            nextPingTime = millis();   // ping immediately on resume
+                            Serial.println(">> RESUMED: pings restarted.");
+                        }
+                        break;
                     case 'v': plotMode = !plotMode; break;
                     case 'r': {
                         uint32_t minMs = (currentRFMode != MODE_STD) ? PING_INTERVAL_MIN_LR_MS : PING_INTERVAL_MIN_MS;
@@ -952,7 +964,7 @@ void loop() {
             }
         }
 
-        if (millis() >= nextPingTime) {
+        if (!masterPaused && millis() >= nextPingTime) {
             nextPingTime = millis() + burstDelay + (unsigned long)JITTER_PRIME_MS[random(0, (int)JITTER_PRIME_COUNT)];
             if (waitingForPong && !plotMode) { 
                 // High last RSSI → likely collision (interference); low last RSSI → likely range/signal too low
