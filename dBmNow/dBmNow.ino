@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.0 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.1 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "6.0"
+#define FW_VERSION "6.1"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -186,6 +186,7 @@ void csvLogStop(bool quiet = false);
 void csvLogDump(uint8_t sessionId = 0);
 void csvLogErase();
 void csvLogEraseAll();
+void csvLogList();
 void promiscuousRx(void *buf, wifi_promiscuous_pkt_type_t type);
 void promiscuousEnter();
 void promiscuousExit();
@@ -360,6 +361,38 @@ void csvLogEraseAll() {
     activeCsvSession = 0;
     if (isMaster) csvSessionId = 0;
     Serial.printf(">> CSV: erased %u log file(s).\n", count);
+}
+
+void csvLogList() {
+    if (!SPIFFS.begin(true)) { Serial.println(">> CSV: SPIFFS mount failed."); return; }
+    File root = SPIFFS.open("/");
+    uint8_t count = 0;
+    uint32_t totalBytes = 0;
+    Serial.println(">> SPIFFS log files:");
+    File file = root.openNextFile();
+    while (file) {
+        if (!file.isDirectory()) {
+            String name = String(file.name());
+            bool match = (name.startsWith("/log_") || name.startsWith("log_")) && name.endsWith(".csv");
+            if (match) {
+                uint32_t sz = file.size();
+                String fullPath = name.startsWith("/") ? name : ("/" + name);
+                // Extract session number from filename for active marker
+                int underscore = fullPath.lastIndexOf('_');
+                int dot = fullPath.lastIndexOf('.');
+                uint8_t sessNum = (underscore >= 0 && dot > underscore) ? (uint8_t)fullPath.substring(underscore + 1, dot).toInt() : 0;
+                bool isActive = (csvFileLogging && sessNum == activeCsvSession);
+                Serial.printf("   %-18s %6u bytes%s\n", fullPath.c_str(), sz, isActive ? "  <-- active" : "");
+                totalBytes += sz;
+                count++;
+            }
+        }
+        file.close();
+        file = root.openNextFile();
+    }
+    root.close();
+    if (count == 0) Serial.println("   (none)");
+    Serial.printf(">> %u file(s), %u bytes used\n", count, totalBytes);
 }
 
 // --- PROMISCUOUS TEST MODE (master only) ---
@@ -704,6 +737,7 @@ void printDetailedStatus() {
         Serial.println("  [c] Reset Stats    : Clear interference/range counters");
         Serial.println("  [x] Reset RF pref  : Clear saved RF mode (next boot = STD), restart");
         Serial.println("  [f] CSV file log  : Start new session /log_N.csv (or stop if active); transponder follows");
+        Serial.println("  [L] List CSV      : List all /log_N.csv files with sizes");
         Serial.println("  [d] Dump CSV      : d = dump active session; dN = dump session N (e.g. d1)");
         Serial.println("  [e] Erase CSV     : Delete active session file");
         Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
@@ -730,6 +764,7 @@ void printDetailedStatus() {
         Serial.println("  [H] Hunt on timeout: Toggle cycle channel/mode when no ping (OFF by default; use for lab)");
         Serial.println("  [0] Force STD     : Set RF to 802.11b and restart (resync with master)");
         Serial.println("  [f] CSV file log  : Start local session /log_N.csv (or stop); master ping overrides");
+        Serial.println("  [L] List CSV      : List all /log_N.csv files with sizes");
         Serial.println("  [d] Dump CSV      : d = dump active session; dN = dump session N (e.g. d1)");
         Serial.println("  [e] Erase CSV     : Delete active session file");
         Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
@@ -879,6 +914,7 @@ void loop() {
                             csvLogStart(csvSessionId);
                         }
                         break;
+                    case 'L': csvLogList(); break;
                     case 'd': csvLogDump((uint8_t)(val > 0 ? (uint8_t)val : 0)); break;
                     case 'e': csvLogErase(); break;
                     case 'E':
@@ -1049,6 +1085,7 @@ void loop() {
                         csvLogStart(csvSessionId);
                     }
                     break;
+                case 'L': csvLogList(); break;
                 case 'd': { uint8_t ds = (uint8_t)max(0L, Serial.parseInt()); csvLogDump(ds); break; }
                 case 'e': csvLogErase(); break;
                 case 'E':

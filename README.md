@@ -1,4 +1,4 @@
-﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.0)
+﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.1)
 
 ## Table of contents
 
@@ -210,6 +210,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | `z` | Zero cal: set reference from last RSSI so **Z** = delta from that point (or on next pong if none yet) |
 | `c` | Reset minute counters (interference / signal-too-low stats) |
 | `f` | Start a **new CSV logging session** (`/log_N.csv`, N increments each start) or stop the active session. Session counter saved to NVS so IDs never repeat across reboots. Transponder follows automatically via payload. |
+| `L` | **List** all `/log_N.csv` files on SPIFFS with sizes; marks the active session |
 | `d` | Dump **active** session log to Serial; `dN` (e.g. `d1`) dumps a specific session file |
 | `e` | Erase the **active** session file only |
 | `E` | **Erase all** `/log_N.csv` files on SPIFFS — two-press confirm (press `E` twice within 5 s) |
