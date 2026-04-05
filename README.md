@@ -112,6 +112,8 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 
 > **Important:** ESP32 GND, relay PIN 2, and the 12 V supply GND must all share a common ground. Without a common ground the MOSFET driver will not see GPIO 4 HIGH as a valid logic level.
 
+> **Minimum supply voltage:** The SV1AFN module's resistor network is designed for a **12–13.8 V** supply on PIN 3. The relay coil will not pull in reliably below about **9 V** — the on-board resistors drop too much voltage at lower supply levels. The green LED (control/MOSFET side) will still light at any voltage, so a lit LED alone does **not** confirm the relay has switched. Use at least **9 V** on PIN 3; **12 V** is recommended for reliable operation.
+
 Enable/disable with **`T`** on the transponder Serial (saved to NVS). When enabled: GPIO 4 goes HIGH just before every pong is sent, waits 15 ms for the relay to settle, sends the pong, and goes LOW again once the `onDataSent` callback fires. When **1-way RF mode** is ON the transponder never sends a pong, so GPIO 4 stays LOW permanently.
 
 **External antennas (u.fl cables):** If you use ESP32 dev boards with **u.fl cables and external antennas**, **do not connect the two devices directly** without at least **60 dB of attenuation** between them (e.g. attenuators or sufficient physical separation). Direct connection at full TX power can overload the receiver and damage hardware.
