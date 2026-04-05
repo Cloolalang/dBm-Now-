@@ -394,6 +394,22 @@ void csvLogList() {
     root.close();
     if (count == 0) Serial.println("   (none)");
     Serial.printf(">> %u file(s), %u bytes used\n", count, totalBytes);
+    Serial.println("--------------------------------------------------");
+    if (isMaster) {
+        Serial.println("  [f] Start new session / stop active");
+        Serial.println("  [d] Dump active session;  dN = dump session N (e.g. d1)");
+        Serial.println("  [e] Erase active session file");
+        Serial.println("  [E] Erase ALL log files   (two-press confirm)");
+        Serial.println("  [m] Max record time secs  (e.g. m300; 0=no limit)");
+        Serial.printf( "  [q] %s pings\n", masterPaused ? "Resume" : "Pause");
+    } else {
+        Serial.println("  [f] Start local session / stop active");
+        Serial.println("  [d] Dump active session;  dN = dump session N (e.g. d1)");
+        Serial.println("  [e] Erase active session file");
+        Serial.println("  [E] Erase ALL log files   (two-press confirm)");
+        Serial.println("  [m] Max record time secs  (e.g. m300; 0=no limit)");
+    }
+    Serial.println("--------------------------------------------------");
 }
 
 // --- PROMISCUOUS TEST MODE (master only) ---
