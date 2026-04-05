@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v5.6 (1-way RF + built-in Serial–MQTT Bridge)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.0 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "5.6"
+#define FW_VERSION "6.0"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -63,12 +63,20 @@ unsigned long lastStatusPrint = 0, lastPingTime = 0;
 bool waitingForPong = false, pendingRX = false;
 unsigned long nextPingTime = 0;
 
-// CSV file logging (master + transponder; same path, role-specific columns)
-const char* CSV_PATH = "/log.csv";
+// CSV file logging (master + transponder; session-named files /log_N.csv on SPIFFS)
+uint8_t csvSessionId    = 0;   // master: broadcast session (0=off, 1-255=active); transponder: mirrors master or local
+uint8_t activeCsvSession = 0;  // session ID of currently open file handle (0 = none open)
 bool csvFileLogging = false;
 File csvFile;
 uint32_t maxRecordingTimeSec = 0;   // 0 = no limit; auto-stop after this many seconds
-unsigned long csvLogStartTime = 0;   // set when logging starts 
+unsigned long csvLogStartTime = 0;  // set when logging starts
+bool eraseAllConfirmPending = false;
+unsigned long eraseAllConfirmTime = 0;
+#define ERASE_ALL_CONFIRM_MS 5000   // window (ms) to press E a second time to confirm erase-all
+
+String csvPathForSession(uint8_t id) {
+    char buf[16]; snprintf(buf, sizeof(buf), "/log_%u.csv", id); return String(buf);
+}
 
 // Rolling missed-packets (master: last N pongs)
 #define MISSED_HISTORY_LEN 10
@@ -166,17 +174,18 @@ typedef struct {
     float zeroed;         // master: Z = (lastKnownRSSI - referenceRSSI) when calibrated; sent so transponder can include in 1-way JSON
     float symmetry;      // master: fwdLoss - bwdLoss from last pong; sent so transponder can include in 1-way JSON
     float pathLossSD;    // master: SD of last 10 forward path losses; sent so transponder can include in 1-way JSON
-    uint8_t csvLog;      // master→transponder: 1 = master CSV logging ON (transponder mirrors to /log.csv)
+    uint8_t csvSessionId; // master→transponder: 0 = logging OFF; 1-255 = active session ID (transponder opens /log_N.csv)
 } Payload;
 Payload myData, txData, rxData;
 
 // Forward declarations (needed when built as C++ e.g. PlatformIO; Arduino .ino ignores)
 void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int len);
 void handleLED();
-void csvLogStart(bool quiet = false);
+void csvLogStart(uint8_t sessionId, bool quiet = false);
 void csvLogStop(bool quiet = false);
-void csvLogDump();
+void csvLogDump(uint8_t sessionId = 0);
 void csvLogErase();
+void csvLogEraseAll();
 void promiscuousRx(void *buf, wifi_promiscuous_pkt_type_t type);
 void promiscuousEnter();
 void promiscuousExit();
@@ -256,28 +265,31 @@ void setPower(float pwr) {
     delay(20);
 }
 
-void csvLogStart(bool quiet) {
+void csvLogStart(uint8_t sessionId, bool quiet) {
     if (csvFileLogging) return;
+    if (sessionId == 0) { if (!quiet) Serial.println(">> CSV: invalid session ID 0."); return; }
     if (!SPIFFS.begin(true)) {
         if (!quiet) Serial.println(">> CSV: SPIFFS mount failed.");
         return;
     }
-    csvFile = SPIFFS.open(CSV_PATH, "a");
+    String path = csvPathForSession(sessionId);
+    csvFile = SPIFFS.open(path, "a");
     if (!csvFile) {
         if (!quiet) Serial.println(">> CSV: open failed.");
         return;
     }
     if (csvFile.size() == 0) {
         if (isMaster)
-            csvFile.println("timestamp,nonce,fwdLoss,bwdLoss,symmetry,zeroed,masterRSSI,remoteRSSI,linkPct,lavg,chipTempC");
+            csvFile.println("timestamp,nonce,fwdLoss,bwdLoss,symmetry,zeroed,masterRSSI,remoteRSSI,linkPct,lavg,chipTempC,plSD");
         else
             csvFile.println("timestamp,nonce,rfMode,rssi,masterPwr,pathLoss,transponderPwr");
     }
     csvFile.flush();
     csvFileLogging = true;
+    activeCsvSession = sessionId;
     csvLogStartTime = millis();
     if (!quiet) {
-        Serial.printf(">> CSV logging ON -> %s", CSV_PATH);
+        Serial.printf(">> CSV logging ON -> %s (session %u)", path.c_str(), sessionId);
         if (maxRecordingTimeSec > 0) Serial.printf(" (max %u s)", maxRecordingTimeSec);
         Serial.println();
     }
@@ -287,26 +299,67 @@ void csvLogStop(bool quiet) {
     if (!csvFileLogging) return;
     csvFile.close();
     csvFileLogging = false;
+    activeCsvSession = 0;
+    if (isMaster) csvSessionId = 0;   // broadcast stop to transponder on next ping
     if (!quiet) Serial.println(">> CSV logging OFF.");
 }
 
-void csvLogDump() {
+void csvLogDump(uint8_t sessionId) {
     if (csvFileLogging) { Serial.println(">> Stop CSV log first (f)."); return; }
+    uint8_t target = (sessionId > 0) ? sessionId : activeCsvSession;
+    if (target == 0) { Serial.println(">> No active session. Use dN (e.g. d1) to dump a specific session."); return; }
     if (!SPIFFS.begin(true)) { Serial.println(">> CSV: SPIFFS mount failed."); return; }
-    File f = SPIFFS.open(CSV_PATH, "r");
-    if (!f || f.isDirectory()) { Serial.println(">> CSV: no file or empty."); return; }
-    Serial.printf(">> --- %s ---\n", CSV_PATH);
+    String path = csvPathForSession(target);
+    File f = SPIFFS.open(path, "r");
+    if (!f || f.isDirectory()) { Serial.printf(">> CSV: %s not found.\n", path.c_str()); return; }
+    Serial.printf(">> --- %s (session %u) ---\n", path.c_str(), target);
     while (f.available()) Serial.write(f.read());
     f.close();
-    Serial.println(">> --- end ---");
+    Serial.println("\n>> --- end ---");
 }
 
 void csvLogErase() {
+    if (activeCsvSession == 0) { Serial.println(">> No active session to erase. Use erase-all (E) to remove all log files."); return; }
     csvLogStop();
-    if (SPIFFS.begin(true) && SPIFFS.exists(CSV_PATH)) {
-        SPIFFS.remove(CSV_PATH);
-        Serial.println(">> CSV file erased.");
+    if (SPIFFS.begin(true)) {
+        String path = csvPathForSession(activeCsvSession);
+        if (SPIFFS.exists(path)) {
+            SPIFFS.remove(path);
+            Serial.printf(">> CSV file %s erased.\n", path.c_str());
+        } else {
+            Serial.printf(">> CSV: %s not found.\n", path.c_str());
+        }
     }
+    activeCsvSession = 0;
+    if (isMaster) csvSessionId = 0;
+}
+
+void csvLogEraseAll() {
+    csvLogStop(true);
+    if (!SPIFFS.begin(true)) { Serial.println(">> CSV: SPIFFS mount failed."); return; }
+    File root = SPIFFS.open("/");
+    uint8_t count = 0;
+    File file = root.openNextFile();
+    while (file) {
+        if (!file.isDirectory()) {
+            String name = String(file.name());   // ESP32 core 3.x includes leading '/'
+            file.close();
+            // Match both "/log_N.csv" (core 3.x) and "log_N.csv" (older cores)
+            bool match = (name.startsWith("/log_") || name.startsWith("log_")) && name.endsWith(".csv");
+            if (match) {
+                String fullPath = name.startsWith("/") ? name : ("/" + name);
+                SPIFFS.remove(fullPath);
+                count++;
+            }
+        } else {
+            file.close();
+        }
+        file = root.openNextFile();
+    }
+    root.close();
+    activeCsvSession = 0;
+    if (isMaster) csvSessionId = 0;
+    Serial.printf(">> CSV: erased %u log file(s).\n", count);
 }
 
 // --- PROMISCUOUS TEST MODE (master only) ---
@@ -465,13 +518,20 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             rxData.missedCount = 0;   // old 25-byte payload
             if (len < (int)sizeof(Payload)) {
                 rxData.oneWayRF = 0;   // old payload: no oneWayRF field
-                rxData.csvLog = 0;     // old payload: no master CSV sync
+                rxData.csvSessionId = 0;   // old payload: treat as logging off
             }
         }
         if (len >= (int)sizeof(Payload)) {
-            bool wantLog = (rxData.csvLog != 0);
-            if (wantLog && !csvFileLogging) csvLogStart(true);
-            else if (!wantLog && csvFileLogging) csvLogStop(true);
+            uint8_t incomingSess = rxData.csvSessionId;
+            if (incomingSess == 0) {
+                if (csvFileLogging) csvLogStop(true);   // master said logging off
+            } else {
+                if (!csvFileLogging || activeCsvSession != incomingSess) {
+                    if (csvFileLogging) csvLogStop(true);   // close old session silently
+                    csvSessionId = incomingSess;            // track master's session locally
+                    csvLogStart(incomingSess, true);
+                }
+            }
             if (rxData.oneWayRF != 0) {
                 if (!oneWayRFMode) {
                     oneWayRFMode = true;
@@ -624,7 +684,10 @@ void printDetailedStatus() {
         Serial.printf("  1-WAY RF    : %s (request transponder reply via JSON on Serial, no pong)\n", requestOneWayRF ? "REQUESTED" : "OFF");
         { float t = getChipTempC(); if (t > -100.0f) Serial.printf("  CHIP TEMP   : %.1f C\n", t); else Serial.println("  CHIP TEMP   : N/A"); }
         { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL     : Throttled (actual %.1f dBm, requested %.1f dBm)\n", a, currentPower); else Serial.println("  THERMAL     : OK"); }
-        Serial.printf("  CSV LOG     : %s (transponder mirrors via ping when linked)\n", csvFileLogging ? "ON" : "OFF");
+        if (csvFileLogging && activeCsvSession > 0)
+            Serial.printf("  CSV LOG     : ON  session %u -> %s (transponder mirrors via ping)\n", activeCsvSession, csvPathForSession(activeCsvSession).c_str());
+        else
+            Serial.printf("  CSV LOG     : OFF (last session: %u)\n", csvSessionId);
         Serial.printf("  CSV MAX    : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.println("--------------------------------------------------");
         Serial.println("  [l] Toggle Mode    : Cycle STD -> 250k -> 500k");
@@ -640,9 +703,10 @@ void printDetailedStatus() {
         Serial.println("  [z] Zero Cal       : Reset calibration reference");
         Serial.println("  [c] Reset Stats    : Clear interference/range counters");
         Serial.println("  [x] Reset RF pref  : Clear saved RF mode (next boot = STD), restart");
-        Serial.printf("  [f] CSV file log  : Toggle logging to %s (SPIFFS)\n", CSV_PATH);
-        Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
-        Serial.println("  [e] Erase CSV     : Delete log file for fresh start");
+        Serial.println("  [f] CSV file log  : Start new session /log_N.csv (or stop if active); transponder follows");
+        Serial.println("  [d] Dump CSV      : d = dump active session; dN = dump session N (e.g. d1)");
+        Serial.println("  [e] Erase CSV     : Delete active session file");
+        Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
         Serial.println("  [n] Set channel   : RF channel 1-14, e.g. n6 (transponder follows)");
         Serial.println("  [P] Promiscuous    : Start channel scan (loops 1-14 until [E] exit)");
@@ -653,7 +717,10 @@ void printDetailedStatus() {
         Serial.printf("  1-WAY RF  : %s (reply via JSON on Serial; no ESP-NOW pong)\n", oneWayRFMode ? "ON" : "OFF");
         Serial.printf("  TIMEOUT   : %u ms\n", transponderTimeout);
         Serial.printf("  HUNT ON TIMEOUT : %s (cycle channel/mode if no ping; [H] toggle; OFF = stay on channel for open-air)\n", transponderHuntOnTimeout ? "ON" : "OFF");
-        Serial.printf("  CSV LOG   : %s (mirrors master [f] over RF; local [f] until next ping)\n", csvFileLogging ? "ON" : "OFF");
+        if (csvFileLogging && activeCsvSession > 0)
+            Serial.printf("  CSV LOG   : ON  session %u -> %s (mirrors master via ping; or local)\n", activeCsvSession, csvPathForSession(activeCsvSession).c_str());
+        else
+            Serial.printf("  CSV LOG   : OFF (last session: %u; mirrors master [f] over RF)\n", csvSessionId);
         Serial.printf("  CSV MAX   : %u s (0=no limit)\n", maxRecordingTimeSec);
         Serial.printf("  MAC ADDR   : %s\n", WiFi.macAddress().c_str());
         Serial.printf("  ESP-NOW    : RX: broadcast, TX: unicast\n");
@@ -662,9 +729,10 @@ void printDetailedStatus() {
         Serial.println("  [W] 1-way RF      : Reply via JSON on Serial (no pong); for Serial-MQTT bridge to cloud");
         Serial.println("  [H] Hunt on timeout: Toggle cycle channel/mode when no ping (OFF by default; use for lab)");
         Serial.println("  [0] Force STD     : Set RF to 802.11b and restart (resync with master)");
-        Serial.printf("  [f] CSV file log  : Toggle logging to %s (SPIFFS)\n", CSV_PATH);
-        Serial.println("  [d] Dump CSV      : Print log file to Serial (copy to save)");
-        Serial.println("  [e] Erase CSV     : Delete log file for fresh start");
+        Serial.println("  [f] CSV file log  : Start local session /log_N.csv (or stop); master ping overrides");
+        Serial.println("  [d] Dump CSV      : d = dump active session; dN = dump session N (e.g. d1)");
+        Serial.println("  [e] Erase CSV     : Delete active session file");
+        Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
         Serial.println("  [h] Help          : Show this status");
     }
@@ -695,6 +763,7 @@ void setup() {
         prefs.begin("probe", true);
         currentRFMode = MODE_STD;   // always boot on standard rate for quick sync (not LR)
         requestOneWayRF = prefs.getBool("oneWayReq", false);   // restore 1-way request after power cycle
+        csvSessionId = prefs.getUChar("csvSess", 0);           // restore session counter so new sessions don't reuse old IDs
         prefs.end();
         minuteTimer = millis();
     } else {
@@ -800,9 +869,28 @@ void loop() {
                         Serial.println(">> RF preference cleared. Restarting (next boot = STD)...");
                         delay(200); ESP.restart();
                         break;
-                    case 'f': if (csvFileLogging) csvLogStop(); else csvLogStart(); break;
-                    case 'd': csvLogDump(); break;
+                    case 'f':
+                        if (csvFileLogging) {
+                            csvLogStop();
+                        } else {
+                            csvSessionId++;
+                            if (csvSessionId == 0) csvSessionId = 1;   // skip 0 (reserved = off)
+                            prefs.begin("probe", false); prefs.putUChar("csvSess", csvSessionId); prefs.end();
+                            csvLogStart(csvSessionId);
+                        }
+                        break;
+                    case 'd': csvLogDump((uint8_t)(val > 0 ? (uint8_t)val : 0)); break;
                     case 'e': csvLogErase(); break;
+                    case 'E':
+                        if (eraseAllConfirmPending && (millis() - eraseAllConfirmTime < ERASE_ALL_CONFIRM_MS)) {
+                            eraseAllConfirmPending = false;
+                            csvLogEraseAll();
+                        } else {
+                            eraseAllConfirmPending = true;
+                            eraseAllConfirmTime = millis();
+                            Serial.println(">> WARNING: This will erase ALL /log_N.csv files on SPIFFS. Press E again within 5 s to confirm.");
+                        }
+                        break;
                     case 'm': {
                         uint32_t mVal = (uint32_t)(val < 0 ? 0 : (val > MAX_RECORD_TIME_SEC ? MAX_RECORD_TIME_SEC : val));
                         if ((val < 0 || val > MAX_RECORD_TIME_SEC) && Serial && !plotMode) Serial.printf(">> Max record time clamped to 0–%u s\n", (unsigned)MAX_RECORD_TIME_SEC);
@@ -859,7 +947,7 @@ void loop() {
                 myData.symmetry = lastSymmetry;   // fwdLoss - bwdLoss from last pong
                 myData.pathLossSD = lastPathLossSD;   // SD of last 10 forward path losses for 1-way JSON
             }
-            myData.csvLog = csvFileLogging ? 1 : 0;   // transponder mirrors CSV logging to SPIFFS
+            myData.csvSessionId = csvSessionId;   // transponder mirrors session: 0=off, 1-255=open /log_N.csv
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;
@@ -951,9 +1039,28 @@ void loop() {
                     if (Serial) Serial.println(">> RF forced to STD (802.11b), restarting...");
                     delay(100); ESP.restart();
                     break;
-                case 'f': if (csvFileLogging) csvLogStop(); else csvLogStart(); break;
-                case 'd': csvLogDump(); break;
+                case 'f':
+                    if (csvFileLogging) {
+                        csvLogStop();
+                        csvSessionId = 0;
+                    } else {
+                        csvSessionId++;
+                        if (csvSessionId == 0) csvSessionId = 1;
+                        csvLogStart(csvSessionId);
+                    }
+                    break;
+                case 'd': { uint8_t ds = (uint8_t)max(0L, Serial.parseInt()); csvLogDump(ds); break; }
                 case 'e': csvLogErase(); break;
+                case 'E':
+                    if (eraseAllConfirmPending && (millis() - eraseAllConfirmTime < ERASE_ALL_CONFIRM_MS)) {
+                        eraseAllConfirmPending = false;
+                        csvLogEraseAll();
+                    } else {
+                        eraseAllConfirmPending = true;
+                        eraseAllConfirmTime = millis();
+                        if (Serial) Serial.println(">> WARNING: This will erase ALL /log_N.csv files on SPIFFS. Press E again within 5 s to confirm.");
+                    }
+                    break;
                 case 'h': printDetailedStatus(); break;
             }
         }

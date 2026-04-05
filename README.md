@@ -1,4 +1,4 @@
-# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v5.6)
+﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.0)
 
 ## Table of contents
 
@@ -82,9 +82,9 @@ Uses a **~40-byte** `Payload` struct (compatible with ESP-NOW v1.0 and v2.0; sho
 | `missedCount` | uint8_t | 0 (not used) | Number of packets the transponder missed before this nonce (gap in sequence); 0 = none |
 | `oneWayRF` | uint8_t | 0=normal, 1=request transponder **1-way RF** (reply via JSON on Serial only; no pong) | 0 (not used in pong) |
 | `zeroed`, `symmetry`, `pathLossSD` | float | Master: Z (delta from ref RSSI), fwd−bwd symmetry, path loss SD (last 10); for 1-way JSON. In 1-way mode sent as 0. | Transponder echoes in 1-way JSON only |
-| `csvLog` | uint8_t | 1 while master **CSV file logging** is ON (`f`); 0 when OFF — transponder **mirrors** logging to its own `/log.csv` when linked (see **CSV file logging** in §3 Master serial commands) | 0 (not used in pong) |
+| `csvSessionId` | uint8_t | Active session ID (1–255) while master CSV logging is ON (`f`); 0 when OFF — transponder **mirrors** by opening `/log_N.csv` for the matching session, and closes when 0 (see **CSV file logging** in §3 Master serial commands) | 0 (not used in pong) |
 
-On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), **oneWayRF** (1 when master has requested 1-way RF), and **`csvLog`** (1 when master SPIFFS CSV logging is active). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), **oneWayRF** (1 when master has requested 1-way RF), and **`csvSessionId`** (current session number, or 0 when logging is off). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
 
 ---
 
@@ -209,13 +209,14 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |
 | `z` | Zero cal: set reference from last RSSI so **Z** = delta from that point (or on next pong if none yet) |
 | `c` | Reset minute counters (interference / signal-too-low stats) |
-| `f` | Toggle CSV file logging to SPIFFS (`/log.csv`) |
-| `d` | Dump log file to Serial (copy to save on PC) |
-| `e` | Erase log file for fresh start |
+| `f` | Start a **new CSV logging session** (`/log_N.csv`, N increments each start) or stop the active session. Session counter saved to NVS so IDs never repeat across reboots. Transponder follows automatically via payload. |
+| `d` | Dump **active** session log to Serial; `dN` (e.g. `d1`) dumps a specific session file |
+| `e` | Erase the **active** session file only |
+| `E` | **Erase all** `/log_N.csv` files on SPIFFS — two-press confirm (press `E` twice within 5 s) |
 | `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
 | `n` + number | Set RF channel 1-14, e.g. `n6`; master sends new channel in payload for 3 pings before switching so transponder can switch first (quicker link re-establishment); saved to NVS |
 | `P` | **Start promiscuous scan** (master only): sweep channels 1–14 repeatedly; report packet count, avg/min RSSI, busy % per channel |
-| `E` or `e` | **Exit** promiscuous scan; resumes ESP-NOW |
+| `e` or `E` | **Exit** promiscuous scan; resumes ESP-NOW *(only while scan is active — outside of scan, `e`/`E` are the CSV erase commands above)* |
 
 **Promiscuous test mode (master only):** Send **`P`** (uppercase) to stop ESP-NOW and enter WiFi promiscuous mode. The master sweeps channels 1–14, dwelling ~2.1 s per channel, and prints one line per channel: **Ch \| Pkts \| AvgRSSI \| MinRSSI \| Busy%**. It keeps scanning (1→14, then 1→14 again) until you send **`E`** or **`e`** to exit; then ESP-NOW is restored. Use this to see which channels are busy and typical signal levels. Promiscuous mode and ESP-NOW cannot run at the same time, so the link is paused during the scan.
 
@@ -223,16 +224,18 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 
 **Maximum range (shoot-out mode):** For the longest radio range, set **Long Range 250 kbps** (**`l`** until you see 250k), **max TX power** on both master (**`p`** + 20 or highest) and transponder (**`t`** + 20 or highest via master target), and a ping interval (**`r`** + value; 10 ms minimum for STD and LR). **Theoretical open-ground range with panel antennas:** Using a simple free-space link budget (e.g. 20 dBm TX, LR 250k receiver sensitivity on the order of −100 dBm, 10–12 dBi gain per side, 15 dB margin for fading/terrain), **theoretical line-of-sight range is on the order of 20–30 km** with directional panels pointed at each other. Real-world open ground will be less due to multipath, ground reflection, and obstacles; actual range depends on antenna gain, feed loss, and local conditions.
 
-**CSV file logging:** **`f`** = start/stop, **`d`** = dump to Serial, **`e`** = erase, **`m`** + seconds = max recording time (0 = no limit). Path: SPIFFS `/log.csv` on **each** ESP32. Requires SPIFFS partition (default 4MB usually has it).
+**CSV file logging:** `f` = start new session / stop, `d` / `dN` = dump active or specific session, `e` = erase active session, `E` = erase all (two-press confirm), `m` + seconds = max recording time (0 = no limit). Files are named `/log_N.csv` (N = session number 1-255, wrapping) on SPIFFS of **each** ESP32. Requires SPIFFS partition (default 4 MB usually has it).
 
-**Master → transponder sync:** When you toggle CSV logging on the **master** with **`f`**, each ping carries a **`csvLog`** flag in the ESP-NOW payload. The **transponder** mirrors that state: it starts or stops writing to its own `/log.csv` on each received ping (no separate Serial command needed on the transponder for a paired session). **Flash the same firmware on both devices** so the payload includes `csvLog`. After you stop logging on the master and connect Serial to the **transponder**, **`d`** will dump the transponder-side log (receive-path columns). If you only toggle **`f`** on the transponder while the master’s logging is **off**, the next ping from the master clears transponder logging (transponder follows the master when linked).
+**Session IDs:** Each press of `f` to start logging increments a session counter (saved to NVS so it survives reboots and never reuses old file IDs). The active session ID is broadcast in every ping. When the master stops logging the ID goes to 0 and the transponder closes its file. If the master starts a new test (new ID), the transponder closes the old file and opens the new one automatically.
+
+**Master to transponder sync:** When you press `f` on the **master**, each ping carries the `csvSessionId` in the ESP-NOW payload. The transponder mirrors it: opens `/log_N.csv` for the matching session, switches files if the ID changes mid-run, and stops when the ID becomes 0. No separate Serial command needed on the transponder for a paired session. **Flash the same firmware on both devices.** After stopping, connect Serial to the **transponder** and use `d` (or `dN`) to dump the transponder-side log (receive-path columns). If you press `f` on the transponder **locally** while the master's logging is off, it starts its own local session; the next ping from the master with a different or zero ID will override it.
 
 | Where | Columns |
 |-------|---------|
 | **Master** (each pong) | timestamp, nonce, fwdLoss, bwdLoss, symmetry, zeroed, masterRSSI, remoteRSSI, linkPct, lavg, chipTempC, plSD |
 | **Transponder** (each received ping) | timestamp, nonce, rfMode, rssi, masterPwr, pathLoss, transponderPwr |
 
-**Transponder one-way link test:** With the link up, start logging on the **master** (**`f`**) so the transponder mirrors via **`csvLog`**, or start logging on the transponder alone (**`f`**) for a local-only capture; set **`m`** + seconds if desired, then walk away with the master. Transponder keeps logging each received ping (master may show NO REPLY). Return, connect Serial to transponder, **`d`** to dump, copy to PC.
+**Transponder one-way link test:** With the link up, start logging on the **master** (`f`) so the transponder mirrors via `csvSessionId`, or start logging on the transponder alone (`f`) for a local-only capture; set `m` + seconds if desired, then walk away with the master. Transponder keeps logging each received ping (master may show NO REPLY). Return, connect Serial to transponder, `d` to dump, copy to PC.
 
 ### 4. Transponder behavior
 
@@ -243,7 +246,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | **`H`** | Toggle **hunt on timeout** (cycle channel/mode when no ping). OFF by default; NVS. |
 | **`0`** | Force RF to STD and restart (resync). |
 | **Serial RX** | Each ping: timestamp, nonce, master MAC, mode, RSSI, path loss, TX Pwr. In 1-way: JSON only (+ LED); no status. |
-| **Sync** | Follows master channel and RF mode from payload; syncs time; **CSV logging** follows master **`csvLog`** in ping when payload is full size. Hunt (if ON) cycles channel/mode after timeouts. |
+| **Sync** | Follows master channel and RF mode from payload; syncs time; **CSV logging** mirrors master `csvSessionId` from ping (opens new session file when ID changes, stops when 0). Hunt (if ON) cycles channel/mode after timeouts. |
 
 ### 5. 1-way RF mode
 
