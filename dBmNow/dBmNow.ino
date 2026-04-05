@@ -302,7 +302,7 @@ void csvLogStop(bool quiet) {
     csvFile.close();
     csvFileLogging = false;
     activeCsvSession = 0;
-    if (isMaster) csvSessionId = 0;   // broadcast stop to transponder on next ping
+    // csvSessionId is NOT reset here — it must keep its value so the next f press increments to the next session
     if (!quiet) Serial.println(">> CSV logging OFF.");
 }
 
@@ -333,7 +333,7 @@ void csvLogErase() {
         }
     }
     activeCsvSession = 0;
-    if (isMaster) csvSessionId = 0;
+    // csvSessionId preserved so next f press increments to a new session number
 }
 
 void csvLogEraseAll() {
@@ -1013,7 +1013,7 @@ void loop() {
                 myData.symmetry = lastSymmetry;   // fwdLoss - bwdLoss from last pong
                 myData.pathLossSD = lastPathLossSD;   // SD of last 10 forward path losses for 1-way JSON
             }
-            myData.csvSessionId = csvSessionId;   // transponder mirrors session: 0=off, 1-255=open /log_N.csv
+            myData.csvSessionId = csvFileLogging ? csvSessionId : 0;   // 0 = off; transponder closes file when 0
             esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
             if (pendingChannel != 0) {
                 pendingChannelPingsSent++;
