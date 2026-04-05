@@ -102,13 +102,15 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 | **GPIO 2** | — | LED (on-board on most dev boards) |
 | **GPIO 4** (TRX_RELAY_PIN) | — | **T/R coax relay** (Transponder only; see below) |
 
-**T/R coax relay (Transponder, optional):** Connect an [SV1AFN RF High-Power Relay](https://sv1afn.com/) (SPDT, 3× SMA) to GPIO 4. HIGH = TX port energised; LOW = RX port (safe default at power-on). Wiring:
+**T/R coax relay (Transponder, optional):** Connect an [SV1AFN RF High-Power Relay](https://sv1afn.com/shop/rf-switch/rf-high-power-relay/) (SPDT, 3× SMA) to GPIO 4. HIGH = TX port energised; LOW = RX port (safe default at power-on). Wiring (J4 connector — 3 pins, **PIN 2 / GND is the middle pin**):
 
-| ESP32 Transponder | Relay module |
-|-------------------|--------------|
-| **GPIO 4** | **PIN 1** (control signal, 3.3 V logic) |
-| **GND** | **PIN 2** (ground) |
-| **12–13.8 V supply** | **PIN 3** (relay coil power) |
+| ESP32 Transponder | Relay module J4 | Position |
+|-------------------|-----------------|----------|
+| **GPIO 4** | **PIN 1** (control signal, 3.3 V logic) | Left |
+| **GND** | **PIN 2** (ground) | **Middle** |
+| **12–13.8 V supply** | **PIN 3** (relay coil power) | Right |
+
+> **Important:** ESP32 GND, relay PIN 2, and the 12 V supply GND must all share a common ground. Without a common ground the MOSFET driver will not see GPIO 4 HIGH as a valid logic level.
 
 Enable/disable with **`T`** on the transponder Serial (saved to NVS). When enabled: GPIO 4 goes HIGH just before every pong is sent, waits 15 ms for the relay to settle, sends the pong, and goes LOW again once the `onDataSent` callback fires. When **1-way RF mode** is ON the transponder never sends a pong, so GPIO 4 stays LOW permanently.
 
