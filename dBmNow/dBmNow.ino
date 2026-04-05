@@ -321,10 +321,12 @@ void csvLogDump(uint8_t sessionId) {
 }
 
 void csvLogErase() {
-    if (activeCsvSession == 0) { Serial.println(">> No active session to erase. Use erase-all (E) to remove all log files."); return; }
-    csvLogStop();
+    // Use active session if logging, otherwise fall back to last known session ID
+    uint8_t target = (activeCsvSession > 0) ? activeCsvSession : csvSessionId;
+    if (target == 0) { Serial.println(">> No session to erase. Use E to remove all log files."); return; }
+    csvLogStop(true);
     if (SPIFFS.begin(true)) {
-        String path = csvPathForSession(activeCsvSession);
+        String path = csvPathForSession(target);
         if (SPIFFS.exists(path)) {
             SPIFFS.remove(path);
             Serial.printf(">> CSV file %s erased.\n", path.c_str());
