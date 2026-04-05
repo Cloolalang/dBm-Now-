@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.2 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.3 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging + T/R relay)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "6.2"
+#define FW_VERSION "6.3"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -129,6 +129,16 @@ volatile uint32_t promPktCount = 0;
 volatile int32_t promRssiSum = 0;
 volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
 
+// T/R Relay (transponder only: GPIO 4, HIGH=TX, LOW=RX)
+#define TRX_RELAY_PIN  4
+#define TRX_SETTLE_MS  15
+enum TRXState { RELAY_RX = 0, SETTLING_TX, WAITING_SENT };
+TRXState trxState = RELAY_RX;
+unsigned long trxSettleStart = 0;
+bool trxRelayEnabled = false;   // runtime toggle; saved to NVS
+uint8_t trxPendingAddr[6];      // master src address for deferred pong send
+bool trxPendingSend = false;
+
 // Transponder Specific
 unsigned long lastPacketTime = 0;
 uint32_t transponderTimeout = 5000;
@@ -212,6 +222,13 @@ void applyRFSettings(uint8_t mode) {
 
     esp_now_init();
     esp_now_register_recv_cb(onDataRecv);
+    esp_now_register_send_cb([](const uint8_t *mac, esp_now_send_status_t status) {
+        if (trxRelayEnabled && trxState == WAITING_SENT) {
+            digitalWrite(TRX_RELAY_PIN, LOW);   // relay back to RX
+            trxState = RELAY_RX;
+            trxPendingSend = false;
+        }
+    });
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, broadcastAddress, 6);
     peerInfo.channel = wifiChannel;
@@ -711,7 +728,16 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             txData.rfMode = currentRFMode;
             txData.measuredRSSI = (float)info->rx_ctrl->rssi;
             txData.oneWayRF = 0;   // pong: transponder does not request 1-way
-            esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
+            if (trxRelayEnabled) {
+                // Deferred send: drive relay to TX, wait TRX_SETTLE_MS in loop() before sending
+                memcpy(trxPendingAddr, info->src_addr, 6);
+                trxPendingSend = true;
+                digitalWrite(TRX_RELAY_PIN, HIGH);
+                trxSettleStart = millis();
+                trxState = SETTLING_TX;
+            } else {
+                esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
+            }
         }
         digitalWrite(ledPin, HIGH); ledTimer = millis() + 40;
     }
@@ -772,6 +798,7 @@ void printDetailedStatus() {
         Serial.printf("  1-WAY RF  : %s (reply via JSON on Serial; no ESP-NOW pong)\n", oneWayRFMode ? "ON" : "OFF");
         Serial.printf("  TIMEOUT   : %u ms\n", transponderTimeout);
         Serial.printf("  HUNT ON TIMEOUT : %s (cycle channel/mode if no ping; [H] toggle; OFF = stay on channel for open-air)\n", transponderHuntOnTimeout ? "ON" : "OFF");
+        Serial.printf("  T/R RELAY : %s (GPIO %d; [T] toggle)\n", trxRelayEnabled ? "ON" : "OFF", TRX_RELAY_PIN);
         if (csvFileLogging && activeCsvSession > 0)
             Serial.printf("  CSV LOG   : ON  session %u -> %s (mirrors master via ping; or local)\n", activeCsvSession, csvPathForSession(activeCsvSession).c_str());
         else
@@ -790,6 +817,7 @@ void printDetailedStatus() {
         Serial.println("  [e] Erase CSV     : Delete last/active session; eN = delete session N (e.g. e2)");
         Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
+        Serial.printf( "  [T] T/R relay     : Toggle T/R coax relay (GPIO %d, HIGH=TX); currently %s\n", TRX_RELAY_PIN, trxRelayEnabled ? "ON" : "OFF");
         Serial.println("  [h] Help          : Show this status");
     }
     Serial.println("==================================================\n");
@@ -827,8 +855,11 @@ void setup() {
         transponderHuntOnTimeout = prefs.getBool("huntT", false);   // default OFF for open-air / lossy links
         oneWayRFMode = prefs.getBool("oneWay", false);   // restore 1-way mode after power cycle
         csvSessionId = prefs.getUChar("csvSess", 0);               // restore last session so e works after power cycle
+        trxRelayEnabled = prefs.getBool("trxRelay", false);        // restore T/R relay state
         prefs.end();
         if (oneWayRFMode) Serial.begin(SERIAL_BAUD_1WAY_RF);   // 9600 for Serial–MQTT bridge when 1-way persisted
+        pinMode(TRX_RELAY_PIN, OUTPUT);
+        digitalWrite(TRX_RELAY_PIN, LOW);   // safe default: relay in RX position
     }
     
     applyRFSettings(currentRFMode);
@@ -1133,6 +1164,19 @@ void loop() {
                     }
                     break;
                 case 'h': printDetailedStatus(); break;
+                case 'T':
+                    trxRelayEnabled = !trxRelayEnabled;
+                    prefs.begin("probe", false);
+                    prefs.putBool("trxRelay", trxRelayEnabled);
+                    prefs.end();
+                    if (!trxRelayEnabled) {
+                        digitalWrite(TRX_RELAY_PIN, LOW);   // safe state on disable
+                        trxState = RELAY_RX;
+                        trxPendingSend = false;
+                    }
+                    if (Serial) Serial.printf(">> T/R relay: %s (GPIO %d)\n",
+                        trxRelayEnabled ? "ON" : "OFF", TRX_RELAY_PIN);
+                    break;
             }
         }
         if (millis() - lastPacketTime > transponderTimeout) { 
@@ -1144,6 +1188,12 @@ void loop() {
                     cycleTransponderProtocol(); 
                 }
             }
+        }
+        // T/R relay state machine: fire deferred pong after settle time
+        if (trxRelayEnabled && trxState == SETTLING_TX &&
+            (millis() - trxSettleStart) >= TRX_SETTLE_MS) {
+            trxState = WAITING_SENT;
+            esp_now_send(trxPendingAddr, (uint8_t *)&txData, sizeof(txData));
         }
         if (ledTimer != 0 && millis() >= ledTimer) { digitalWrite(ledPin, LOW); ledTimer = 0; }
     }

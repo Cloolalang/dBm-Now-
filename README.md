@@ -1,4 +1,4 @@
-﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.2)
+﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.3)
 
 ## Table of contents
 
@@ -99,6 +99,17 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 | **GPIO 13** (ROLE_PIN) | GND | **Master** (only when not Bridge) |
 | **GPIO 13** | Floating / 3.3V | **Transponder** |
 | **GPIO 2** | — | LED (on-board on most dev boards) |
+| **GPIO 4** (TRX_RELAY_PIN) | — | **T/R coax relay** (Transponder only; see below) |
+
+**T/R coax relay (Transponder, optional):** Connect an [SV1AFN RF High-Power Relay](https://sv1afn.com/) (SPDT, 3× SMA) to GPIO 4. HIGH = TX port energised; LOW = RX port (safe default at power-on). Wiring:
+
+| ESP32 Transponder | Relay module |
+|-------------------|--------------|
+| **GPIO 4** | **PIN 1** (control signal, 3.3 V logic) |
+| **GND** | **PIN 2** (ground) |
+| **12–13.8 V supply** | **PIN 3** (relay coil power) |
+
+Enable/disable with **`T`** on the transponder Serial (saved to NVS). When enabled: GPIO 4 goes HIGH just before every pong is sent, waits 15 ms for the relay to settle, sends the pong, and goes LOW again once the `onDataSent` callback fires. When **1-way RF mode** is ON the transponder never sends a pong, so GPIO 4 stays LOW permanently.
 
 **External antennas (u.fl cables):** If you use ESP32 dev boards with **u.fl cables and external antennas**, **do not connect the two devices directly** without at least **60 dB of attenuation** between them (e.g. attenuators or sufficient physical separation). Direct connection at full TX power can overload the receiver and damage hardware.
 
@@ -247,6 +258,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | **`W`** / **`w`** | Toggle 1-way RF (transponder). Or **`W`** on master: request in next ping; transponder switches to 1-way (9600, JSON only, no pong). |
 | **`H`** | Toggle **hunt on timeout** (cycle channel/mode when no ping). OFF by default; NVS. |
 | **`0`** | Force RF to STD and restart (resync). |
+| **`T`** | Toggle **T/R coax relay** (GPIO 4, HIGH=TX). Saved to NVS. When ON: relay switches to TX before each pong send (15 ms settle), returns to RX after `onDataSent`. No effect in 1-way RF mode (GPIO 4 stays LOW). |
 | **Serial RX** | Each ping: timestamp, nonce, master MAC, mode, RSSI, path loss, TX Pwr. In 1-way: JSON only (+ LED); no status. |
 | **Sync** | Follows master channel and RF mode from payload; syncs time; **CSV logging** mirrors master `csvSessionId` from ping (opens new session file when ID changes, stops when 0). Hunt (if ON) cycles channel/mode after timeouts. |
 
@@ -364,6 +376,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 | CSV file logging | OFF |
 | CSV session counter | 0 (restored from NVS on boot; increments on first local `f` or first master sync) |
 | CSV max record time | 0 (no limit) |
+| T/R relay | OFF (GPIO 4 LOW; `T` to enable; saved to NVS) |
 
 **Bridge** (GPIO 12 → GND at boot)
 
@@ -398,7 +411,6 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 - **Audio indicator on the master for indicating replies** — An audible cue (e.g. beep or tone) on the master when a pong is received, to improve awareness during link testing and walk-test coordination.
 - **Commands via MQTT** — Allow sending some commands to the device over MQTT (e.g. set channel, toggle 1-way RF, start/stop logging) so the master or transponder can be controlled from the cloud or from an app.
 - **Transponder command acknowledgment** — The pong already carries the transponder’s current channel, rfMode, and txPower. Add on the master: (1) show transponder-reported channel and mode (e.g. in the status line or “TX ch X mode Y”) so the user can see what the transponder says it’s using; (2) when the master has sent a channel or RF-mode change, verify pong.channel / pong.rfMode against what was requested and print a confirmation or mismatch warning (e.g. “>> Transponder confirmed ch X” or “>> Transponder reports ch X (expected Y)”).
-- **TRX relay controller** -- Antenna switching (e.g. for T/R or diversity setups).
 - **RF measurement calibration** -- Calibration for different ESP-NOW modes (STD, LR 250k, LR 500k) for more accurate dBm/path-loss readings.
 - **RF characterisation** -- Characterise the RF behaviour of the device (e.g. TX power vs setting, RSSI linearity) as a reference for calibration.
 - **Unicast mode with 802.11 PHY statistics** -- Unicast operation with PHY stats (retries, etc.) for link analysis; support for operating multiple transponders.
