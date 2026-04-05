@@ -3,13 +3,13 @@
  * Copyright (C) dBm-Now project. Licensed under GPL v2. See LICENSE file.
  *
  * ======================================================================================
- * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.3 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging + T/R relay)
+ * ESP32 RF PROBE & PATH LOSS ANALYZER | v6.5 (1-way RF + built-in Serial–MQTT Bridge + CSV session logging + T/R relay)
  * ======================================================================================
  * Mode at boot: GPIO12 (BRIDGE_PIN) LOW = Serial-MQTT Bridge (WiFi Manager, Serial1→MQTT).
  *               GPIO12 HIGH/floating = Master/Transponder (GPIO13 = ROLE_PIN: LOW=Master, HIGH=Transponder).
  */
 
-#define FW_VERSION "6.3"
+#define FW_VERSION "6.5"
 // Serial baud rate. Set your Serial Monitor to the same value. Higher = less blocking at fast ping rates.
 // Common options: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000.
 #define SERIAL_BAUD 921600
@@ -94,6 +94,7 @@ float lastPathLossSD = 0.0f;
 
 // Rolling Minute Counters
 float lastKnownRSSI = -100.0;
+uint8_t lastKnownTrxRelay = 0;   // master: mirrors transponder's trxRelay field from last pong (0=OFF, 1=ON)
 uint32_t rangeMinCounter = 0, interfMinCounter = 0;
 unsigned long minuteTimer = 0;
 String linkCondition = "STABLE";
@@ -186,6 +187,7 @@ typedef struct {
     float symmetry;      // master: fwdLoss - bwdLoss from last pong; sent so transponder can include in 1-way JSON
     float pathLossSD;    // master: SD of last 10 forward path losses; sent so transponder can include in 1-way JSON
     uint8_t csvSessionId; // master→transponder: 0 = logging OFF; 1-255 = active session ID (transponder opens /log_N.csv)
+    uint8_t trxRelay;     // transponder→master: 0=relay OFF (RX), 1=relay ON (T/R switching enabled, GPIO 4)
 } Payload;
 Payload myData, txData, rxData;
 
@@ -501,6 +503,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
         if (len < (int)sizeof(Payload)) pong.missedCount = 0;
         waitingForPong = false; pendingRX = true; 
         lastKnownRSSI = (float)info->rx_ctrl->rssi;
+        lastKnownTrxRelay = (len >= (int)sizeof(Payload)) ? pong.trxRelay : 0;
         linkCondition = "STABLE"; 
         float mRSSI = lastKnownRSSI; 
         float tRSSI = pong.measuredRSSI;         
@@ -728,6 +731,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             txData.rfMode = currentRFMode;
             txData.measuredRSSI = (float)info->rx_ctrl->rssi;
             txData.oneWayRF = 0;   // pong: transponder does not request 1-way
+            txData.trxRelay = trxRelayEnabled ? 1 : 0;   // report relay state to master
             if (trxRelayEnabled) {
                 // Deferred send: drive relay to TX, wait TRX_SETTLE_MS in loop() before sending
                 memcpy(trxPendingAddr, info->src_addr, 6);
@@ -761,6 +765,7 @@ void printDetailedStatus() {
         Serial.printf("  LINK STATUS : %s\n", masterPaused ? "PAUSED (q to resume)" : linkCondition.c_str());
         Serial.printf("  MASTER PWR  : %.1f dBm | REMOTE: %.1f dBm\n", currentPower, remoteTargetPower);
         Serial.printf("  1-WAY RF    : %s (request transponder reply via JSON on Serial, no pong)\n", requestOneWayRF ? "REQUESTED" : "OFF");
+        Serial.printf("  REMOTE T/R  : %s (transponder T/R relay; [T] on transponder to toggle)\n", lastKnownTrxRelay ? "ON" : "OFF (or no pong yet)");
         { float t = getChipTempC(); if (t > -100.0f) Serial.printf("  CHIP TEMP   : %.1f C\n", t); else Serial.println("  CHIP TEMP   : N/A"); }
         { float a = getActualMaxTxPowerDbm(); if (a > -100.0f && a < currentPower - 1.0f) Serial.printf("  THERMAL     : Throttled (actual %.1f dBm, requested %.1f dBm)\n", a, currentPower); else Serial.println("  THERMAL     : OK"); }
         if (csvFileLogging && activeCsvSession > 0)

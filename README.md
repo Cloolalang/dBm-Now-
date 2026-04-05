@@ -1,4 +1,4 @@
-﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.3)
+﻿# ESP32 2.4 GHz RF Probe & Path Loss Analyzer (v6.5)
 
 ## Table of contents
 
@@ -83,8 +83,9 @@ Uses a **~40-byte** `Payload` struct (compatible with ESP-NOW v1.0 and v2.0; sho
 | `oneWayRF` | uint8_t | 0=normal, 1=request transponder **1-way RF** (reply via JSON on Serial only; no pong) | 0 (not used in pong) |
 | `zeroed`, `symmetry`, `pathLossSD` | float | Master: Z (delta from ref RSSI), fwd−bwd symmetry, path loss SD (last 10); for 1-way JSON. In 1-way mode sent as 0. | Transponder echoes in 1-way JSON only |
 | `csvSessionId` | uint8_t | Active session ID (1–255) while master CSV logging is ON (`f`); 0 when OFF — transponder **mirrors** by opening `/log_N.csv` for the matching session, and closes when 0 (see **CSV file logging** in §3 Master serial commands) | 0 (not used in pong) |
+| `trxRelay` | uint8_t | 0 (not used in ping) | 0 = T/R relay OFF; 1 = T/R relay ON (GPIO 4 switching enabled). Master displays this in status (`h`) as **REMOTE T/R**. |
 
-On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), **oneWayRF** (1 when master has requested 1-way RF), and **`csvSessionId`** (current session number, or 0 when logging is off). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); and sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
+On **ping**, the master fills nonce, its TX power, target power for the transponder, ping interval, time, channel (current or pending target), rfMode (current or pending target), **oneWayRF** (1 when master has requested 1-way RF), and **`csvSessionId`** (current session number, or 0 when logging is off). On **pong**, the transponder echoes nonce, targetPower, pingInterval, and time; sets its own `txPower`, `channel`, and `rfMode`; fills `measuredRSSI` with the RSSI of the ping it received (used for path loss and symmetry); sets **`missedCount`** when the received nonce is not consecutive with the previous one (e.g. received 7 after 5 → missed 6, so missedCount = 1); and sets **`trxRelay`** to 1 when the T/R coax relay feature is enabled on the transponder (0 = relay off). The master stores and displays this as **REMOTE T/R** in the status page (`h`). The transponder logs **Missed packet(s): nonce(s) X–Y** on Serial when it detects a gap (not in 1-way RF mode); the master prints **Transponder missed N packet(s) (nonce(s) X–Y)** when the pong reports missedCount > 0. All payloads are sent in the clear; do not use for sensitive data.
 
 ---
 
