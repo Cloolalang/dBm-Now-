@@ -132,13 +132,17 @@ volatile int promMinRssi = 0;   // 0 = no packet yet; valid RSSI is negative
 
 // T/R Relay (transponder only: GPIO 4, HIGH=TX, LOW=RX)
 #define TRX_RELAY_PIN  4
-#define TRX_SETTLE_MS  15
-enum TRXState { RELAY_RX = 0, SETTLING_TX, WAITING_SENT };
+enum TRXState { RELAY_RX = 0, SETTLING_TX, WAITING_SENT, HOLDING_RX };
 TRXState trxState = RELAY_RX;
 unsigned long trxSettleStart = 0;
+unsigned long trxHoldStart = 0;
+uint32_t trxSettleMs = 15;      // relay TX settle time (ms); adjustable via Tnnn; saved to NVS
+uint32_t trxHoldMs   = 5;       // hold relay in TX after onDataSent fires (ms); adjustable via Unnn; saved to NVS
 bool trxRelayEnabled = false;   // runtime toggle; saved to NVS
+bool trxVerbose = false;        // print relay state transitions for debugging; Tv to toggle
 uint8_t trxPendingAddr[6];      // master src address for deferred pong send
 bool trxPendingSend = false;
+bool trxTestPulse = false;      // set by Tp command: fire one manual test pulse
 
 // Transponder Specific
 unsigned long lastPacketTime = 0;
@@ -226,9 +230,9 @@ void applyRFSettings(uint8_t mode) {
     esp_now_register_recv_cb(onDataRecv);
     esp_now_register_send_cb([](const wifi_tx_info_t *info, esp_now_send_status_t status) {
         if (trxRelayEnabled && trxState == WAITING_SENT) {
-            digitalWrite(TRX_RELAY_PIN, LOW);   // relay back to RX
-            trxState = RELAY_RX;
-            trxPendingSend = false;
+            // Start hold timer; loop() drives GPIO LOW after trxHoldMs
+            trxHoldStart = millis();
+            trxState = HOLDING_RX;
         }
     });
     esp_now_peer_info_t peerInfo = {};
@@ -733,12 +737,13 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
             txData.oneWayRF = 0;   // pong: transponder does not request 1-way
             txData.trxRelay = trxRelayEnabled ? 1 : 0;   // report relay state to master
             if (trxRelayEnabled) {
-                // Deferred send: drive relay to TX, wait TRX_SETTLE_MS in loop() before sending
+                // Deferred send: drive relay to TX, wait trxSettleMs in loop() before sending
                 memcpy(trxPendingAddr, info->src_addr, 6);
                 trxPendingSend = true;
                 digitalWrite(TRX_RELAY_PIN, HIGH);
                 trxSettleStart = millis();
                 trxState = SETTLING_TX;
+                if (trxVerbose) Serial.printf("[TRX] GPIO %d HIGH (TX) at %lu ms; settling %u ms\n", TRX_RELAY_PIN, millis(), trxSettleMs);
             } else {
                 esp_now_send(info->src_addr, (uint8_t *) &txData, sizeof(txData));
             }
@@ -803,7 +808,8 @@ void printDetailedStatus() {
         Serial.printf("  1-WAY RF  : %s (reply via JSON on Serial; no ESP-NOW pong)\n", oneWayRFMode ? "ON" : "OFF");
         Serial.printf("  TIMEOUT   : %u ms\n", transponderTimeout);
         Serial.printf("  HUNT ON TIMEOUT : %s (cycle channel/mode if no ping; [H] toggle; OFF = stay on channel for open-air)\n", transponderHuntOnTimeout ? "ON" : "OFF");
-        Serial.printf("  T/R RELAY : %s (GPIO %d; [T] toggle)\n", trxRelayEnabled ? "ON" : "OFF", TRX_RELAY_PIN);
+        Serial.printf("  T/R RELAY : %s (GPIO %d) settle=%u ms  hold=%u ms  verbose=%s\n",
+            trxRelayEnabled ? "ON" : "OFF", TRX_RELAY_PIN, trxSettleMs, trxHoldMs, trxVerbose ? "ON" : "OFF");
         if (csvFileLogging && activeCsvSession > 0)
             Serial.printf("  CSV LOG   : ON  session %u -> %s (mirrors master via ping; or local)\n", activeCsvSession, csvPathForSession(activeCsvSession).c_str());
         else
@@ -822,7 +828,8 @@ void printDetailedStatus() {
         Serial.println("  [e] Erase CSV     : Delete last/active session; eN = delete session N (e.g. e2)");
         Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
-        Serial.printf( "  [T] T/R relay     : Toggle T/R coax relay (GPIO %d, HIGH=TX); currently %s\n", TRX_RELAY_PIN, trxRelayEnabled ? "ON" : "OFF");
+        Serial.printf( "  [T] T/R relay     : Toggle relay ON/OFF; Tnnn=set settle ms (e.g. T50); Tv=verbose; Tp=test pulse\n");
+        Serial.printf( "  [U] T/R hold time : Unnn=set hold-after-send ms (e.g. U20); currently %u ms\n", trxHoldMs);
         Serial.println("  [h] Help          : Show this status");
     }
     Serial.println("==================================================\n");
@@ -861,6 +868,8 @@ void setup() {
         oneWayRFMode = prefs.getBool("oneWay", false);   // restore 1-way mode after power cycle
         csvSessionId = prefs.getUChar("csvSess", 0);               // restore last session so e works after power cycle
         trxRelayEnabled = prefs.getBool("trxRelay", false);        // restore T/R relay state
+        trxSettleMs = prefs.getUInt("trxSettle", 15);              // restore settle time (default 15 ms)
+        trxHoldMs   = prefs.getUInt("trxHold",   5);               // restore hold time (default 5 ms)
         prefs.end();
         if (oneWayRFMode) Serial.begin(SERIAL_BAUD_1WAY_RF);   // 9600 for Serial–MQTT bridge when 1-way persisted
         pinMode(TRX_RELAY_PIN, OUTPUT);
@@ -1169,19 +1178,57 @@ void loop() {
                     }
                     break;
                 case 'h': printDetailedStatus(); break;
-                case 'T':
-                    trxRelayEnabled = !trxRelayEnabled;
-                    prefs.begin("probe", false);
-                    prefs.putBool("trxRelay", trxRelayEnabled);
-                    prefs.end();
-                    if (!trxRelayEnabled) {
-                        digitalWrite(TRX_RELAY_PIN, LOW);   // safe state on disable
-                        trxState = RELAY_RX;
-                        trxPendingSend = false;
+                case 'T': {
+                    // T        = toggle relay ON/OFF
+                    // Tnnn     = set TX-settle time ms (e.g. T50)
+                    // Tv       = toggle verbose debug prints
+                    // Tp       = one-shot manual test pulse (HIGH->settle->hold->LOW, no ping needed)
+                    char sub = Serial.available() ? (char)Serial.peek() : 0;
+                    if (sub >= '1' && sub <= '9') {
+                        // Tnnn: set settle time
+                        trxSettleMs = (uint32_t)Serial.parseInt();
+                        prefs.begin("probe", false); prefs.putUInt("trxSettle", trxSettleMs); prefs.end();
+                        if (Serial) Serial.printf(">> T/R settle time: %u ms\n", trxSettleMs);
+                    } else if (sub == 'v' || sub == 'V') {
+                        Serial.read();
+                        trxVerbose = !trxVerbose;
+                        if (Serial) Serial.printf(">> T/R verbose: %s\n", trxVerbose ? "ON" : "OFF");
+                    } else if (sub == 'p' || sub == 'P') {
+                        Serial.read();
+                        if (trxState == RELAY_RX) {
+                            trxTestPulse = true;
+                            if (Serial) Serial.printf(">> T/R test pulse queued (settle %u ms, hold %u ms)\n", trxSettleMs, trxHoldMs);
+                        } else {
+                            if (Serial) Serial.println(">> T/R test pulse skipped (relay busy)");
+                        }
+                    } else {
+                        // T alone: toggle relay enable
+                        trxRelayEnabled = !trxRelayEnabled;
+                        prefs.begin("probe", false); prefs.putBool("trxRelay", trxRelayEnabled); prefs.end();
+                        if (!trxRelayEnabled) {
+                            digitalWrite(TRX_RELAY_PIN, LOW);
+                            trxState = RELAY_RX;
+                            trxPendingSend = false;
+                        }
+                        if (Serial) Serial.printf(">> T/R relay: %s (GPIO %d, settle %u ms, hold %u ms)\n",
+                            trxRelayEnabled ? "ON" : "OFF", TRX_RELAY_PIN, trxSettleMs, trxHoldMs);
                     }
-                    if (Serial) Serial.printf(">> T/R relay: %s (GPIO %d)\n",
-                        trxRelayEnabled ? "ON" : "OFF", TRX_RELAY_PIN);
                     break;
+                }
+                case 'U': {
+                    // Unnn = set hold-after-send time ms (e.g. U20)
+                    long uval = Serial.parseInt();
+                    if (uval > 0) {
+                        trxHoldMs = (uint32_t)uval;
+                        prefs.begin("probe", false);
+                        prefs.putUInt("trxHold", trxHoldMs);
+                        prefs.end();
+                        if (Serial) Serial.printf(">> T/R hold time: %u ms\n", trxHoldMs);
+                    } else {
+                        if (Serial) Serial.printf(">> T/R hold time currently: %u ms (usage: Unnn, e.g. U20)\n", trxHoldMs);
+                    }
+                    break;
+                }
             }
         }
         if (millis() - lastPacketTime > transponderTimeout) { 
@@ -1194,11 +1241,35 @@ void loop() {
                 }
             }
         }
-        // T/R relay state machine: fire deferred pong after settle time
-        if (trxRelayEnabled && trxState == SETTLING_TX &&
-            (millis() - trxSettleStart) >= TRX_SETTLE_MS) {
-            trxState = WAITING_SENT;
-            esp_now_send(trxPendingAddr, (uint8_t *)&txData, sizeof(txData));
+        // T/R relay state machine
+        if (trxRelayEnabled || trxTestPulse) {
+            if (trxTestPulse && trxState == RELAY_RX) {
+                // Manual test pulse: drive HIGH, start settle timer
+                trxTestPulse = false;
+                digitalWrite(TRX_RELAY_PIN, HIGH);
+                trxSettleStart = millis();
+                trxState = SETTLING_TX;
+                if (trxVerbose || Serial) Serial.printf("[TRX] TEST PULSE: GPIO %d HIGH at %lu ms (settle %u ms)\n", TRX_RELAY_PIN, millis(), trxSettleMs);
+            }
+            if (trxState == SETTLING_TX && (millis() - trxSettleStart) >= trxSettleMs) {
+                if (trxPendingSend) {
+                    // Normal pong: send after settle
+                    trxState = WAITING_SENT;
+                    if (trxVerbose) Serial.printf("[TRX] settled (%u ms); sending pong at %lu ms\n", trxSettleMs, millis());
+                    esp_now_send(trxPendingAddr, (uint8_t *)&txData, sizeof(txData));
+                } else {
+                    // Test pulse: no send, go straight to hold
+                    trxHoldStart = millis();
+                    trxState = HOLDING_RX;
+                    if (trxVerbose) Serial.printf("[TRX] test pulse settled (%u ms); holding %u ms\n", trxSettleMs, trxHoldMs);
+                }
+            }
+            if (trxState == HOLDING_RX && (millis() - trxHoldStart) >= trxHoldMs) {
+                digitalWrite(TRX_RELAY_PIN, LOW);   // relay back to RX
+                trxState = RELAY_RX;
+                trxPendingSend = false;
+                if (trxVerbose) Serial.printf("[TRX] GPIO %d LOW (RX) at %lu ms; cycle complete\n", TRX_RELAY_PIN, millis());
+            }
         }
         if (ledTimer != 0 && millis() >= ledTimer) { digitalWrite(ledPin, LOW); ledTimer = 0; }
     }
