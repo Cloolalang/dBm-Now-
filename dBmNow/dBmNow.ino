@@ -224,7 +224,7 @@ void applyRFSettings(uint8_t mode) {
 
     esp_now_init();
     esp_now_register_recv_cb(onDataRecv);
-    esp_now_register_send_cb([](const uint8_t *mac, esp_now_send_status_t status) {
+    esp_now_register_send_cb([](const wifi_tx_info_t *info, esp_now_send_status_t status) {
         if (trxRelayEnabled && trxState == WAITING_SENT) {
             digitalWrite(TRX_RELAY_PIN, LOW);   // relay back to RX
             trxState = RELAY_RX;
