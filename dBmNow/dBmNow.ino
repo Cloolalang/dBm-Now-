@@ -847,10 +847,11 @@ void loop() {
             if (Serial.available() > 0) { char c = Serial.read(); if (c == 'E' || c == 'e') promiscuousExit(); }
         } else {
         handleLED();
-        if (millis() - minuteTimer >= 60000) {
+        if (!masterPaused && millis() - minuteTimer >= 60000) {
             Serial.printf("\n>>> [MINUTE SUMMARY] Interference: %u | Signal too low: %u <<<\n\n", interfMinCounter, rangeMinCounter);
             interfMinCounter = 0; rangeMinCounter = 0; minuteTimer = millis();
         }
+        if (masterPaused) minuteTimer = millis();   // keep resetting timer while paused so summary doesn't burst on resume
 
         if (Serial.available() > 0) {
             char cmd = Serial.read();
