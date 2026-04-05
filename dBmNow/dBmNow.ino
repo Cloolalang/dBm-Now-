@@ -185,7 +185,7 @@ void handleLED();
 void csvLogStart(uint8_t sessionId, bool quiet = false);
 void csvLogStop(bool quiet = false);
 void csvLogDump(uint8_t sessionId = 0);
-void csvLogErase();
+void csvLogErase(uint8_t sessionId = 0);
 void csvLogEraseAll();
 void csvLogList();
 void promiscuousRx(void *buf, wifi_promiscuous_pkt_type_t type);
@@ -320,9 +320,9 @@ void csvLogDump(uint8_t sessionId) {
     Serial.println("\n>> --- end ---");
 }
 
-void csvLogErase() {
-    // Use active session if logging, otherwise fall back to last known session ID
-    uint8_t target = (activeCsvSession > 0) ? activeCsvSession : csvSessionId;
+void csvLogErase(uint8_t sessionId) {
+    // Priority: explicit sessionId > active session > last known session ID
+    uint8_t target = (sessionId > 0) ? sessionId : (activeCsvSession > 0) ? activeCsvSession : csvSessionId;
     if (target == 0) { Serial.println(">> No session to erase. Use E to remove all log files."); return; }
     csvLogStop(true);
     if (SPIFFS.begin(true)) {
@@ -400,14 +400,14 @@ void csvLogList() {
     if (isMaster) {
         Serial.println("  [f] Start new session / stop active");
         Serial.println("  [d] Dump active session;  dN = dump session N (e.g. d1)");
-        Serial.println("  [e] Erase active session file");
+        Serial.println("  [e] Erase last/active session;  eN = erase session N (e.g. e2)");
         Serial.println("  [E] Erase ALL log files   (two-press confirm)");
         Serial.println("  [m] Max record time secs  (e.g. m300; 0=no limit)");
         Serial.printf( "  [q] %s pings\n", masterPaused ? "Resume" : "Pause");
     } else {
         Serial.println("  [f] Start local session / stop active");
         Serial.println("  [d] Dump active session;  dN = dump session N (e.g. d1)");
-        Serial.println("  [e] Erase active session file");
+        Serial.println("  [e] Erase last/active session;  eN = erase session N (e.g. e2)");
         Serial.println("  [E] Erase ALL log files   (two-press confirm)");
         Serial.println("  [m] Max record time secs  (e.g. m300; 0=no limit)");
     }
@@ -581,6 +581,7 @@ void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incoming, int le
                 if (!csvFileLogging || activeCsvSession != incomingSess) {
                     if (csvFileLogging) csvLogStop(true);   // close old session silently
                     csvSessionId = incomingSess;            // track master's session locally
+                    prefs.begin("probe", false); prefs.putUChar("csvSess", csvSessionId); prefs.end();   // persist so e works after power cycle
                     csvLogStart(incomingSess, true);
                 }
             }
@@ -759,7 +760,7 @@ void printDetailedStatus() {
         Serial.println("  [f] CSV file log  : Start new session /log_N.csv (or stop if active); transponder follows");
         Serial.println("  [L] List CSV      : List all /log_N.csv files with sizes");
         Serial.println("  [d] Dump CSV      : d = dump active session; dN = dump session N (e.g. d1)");
-        Serial.println("  [e] Erase CSV     : Delete active session file");
+        Serial.println("  [e] Erase CSV     : Delete last/active session; eN = delete session N (e.g. e2)");
         Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
         Serial.println("  [n] Set channel   : RF channel 1-14, e.g. n6 (transponder follows)");
@@ -786,7 +787,7 @@ void printDetailedStatus() {
         Serial.println("  [f] CSV file log  : Start local session /log_N.csv (or stop); master ping overrides");
         Serial.println("  [L] List CSV      : List all /log_N.csv files with sizes");
         Serial.println("  [d] Dump CSV      : d = dump active session; dN = dump session N (e.g. d1)");
-        Serial.println("  [e] Erase CSV     : Delete active session file");
+        Serial.println("  [e] Erase CSV     : Delete last/active session; eN = delete session N (e.g. e2)");
         Serial.println("  [E] Erase all CSV : Delete ALL /log_N.csv files (two-press confirm)");
         Serial.println("  [m] Max record    : Set max record time in seconds (0=no limit), e.g. m300");
         Serial.println("  [h] Help          : Show this status");
@@ -825,6 +826,7 @@ void setup() {
         prefs.begin("probe", true);
         transponderHuntOnTimeout = prefs.getBool("huntT", false);   // default OFF for open-air / lossy links
         oneWayRFMode = prefs.getBool("oneWay", false);   // restore 1-way mode after power cycle
+        csvSessionId = prefs.getUChar("csvSess", 0);               // restore last session so e works after power cycle
         prefs.end();
         if (oneWayRFMode) Serial.begin(SERIAL_BAUD_1WAY_RF);   // 9600 for Serial–MQTT bridge when 1-way persisted
     }
@@ -948,7 +950,7 @@ void loop() {
                         break;
                     case 'L': csvLogList(); break;
                     case 'd': csvLogDump((uint8_t)(val > 0 ? (uint8_t)val : 0)); break;
-                    case 'e': csvLogErase(); break;
+                    case 'e': csvLogErase((uint8_t)(val > 0 ? (uint8_t)val : 0)); break;
                     case 'E':
                         if (eraseAllConfirmPending && (millis() - eraseAllConfirmTime < ERASE_ALL_CONFIRM_MS)) {
                             eraseAllConfirmPending = false;
@@ -1119,7 +1121,7 @@ void loop() {
                     break;
                 case 'L': csvLogList(); break;
                 case 'd': { uint8_t ds = (uint8_t)max(0L, Serial.parseInt()); csvLogDump(ds); break; }
-                case 'e': csvLogErase(); break;
+                case 'e': { uint8_t es = (uint8_t)max(0L, Serial.parseInt()); csvLogErase(es); break; }
                 case 'E':
                     if (eraseAllConfirmPending && (millis() - eraseAllConfirmTime < ERASE_ALL_CONFIRM_MS)) {
                         eraseAllConfirmPending = false;
