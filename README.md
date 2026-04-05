@@ -204,7 +204,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | `t` + number | Set remote (transponder) target power (dBm), e.g. `t8`. **Valid range:** same as master (-1 to +20 dBm). |
 | `s` | Set remote target power = current master power |
 | `v` | Toggle plot mode (CSV-style output: channel, fwdLoss, bwdLoss, symmetry, zeroed, linkPct, lavg, plSD) |
-| `q` | **Pause / resume** pings (master only) — suspends all TX while paused; all other Serial commands still work. Pausing the master also silences the transponder since it only responds to pings. |
+| `q` | **Pause / resume** pings (master only) — suspends all TX, auto-status page, and minute summary while paused; all Serial commands still work. Pausing the master also silences the transponder since it only responds to pings. Press `q` again to resume; timers reset so no burst of output on resume. |
 | `r` + number | Set ping interval (ms), e.g. `r500`. **Valid range:** 10 ms minimum (STD and Long Range); **max** not enforced by firmware (e.g. 100–86400000 ms). LR mode can work at 10 ms. |
 | `h` | Print detailed status |
 | `k` + number | Set time (HHMM), e.g. `k1430` = 14:30 |
@@ -213,7 +213,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | `f` | Start a **new CSV logging session** (`/log_N.csv`, N increments each start) or stop the active session. Session counter saved to NVS so IDs never repeat across reboots. Transponder follows automatically via payload. |
 | `L` | **List** all `/log_N.csv` files on SPIFFS with sizes; marks the active session |
 | `d` | Dump **active** session log to Serial; `dN` (e.g. `d1`) dumps a specific session file |
-| `e` | Erase the **active** session file only |
+| `e` | Erase the last/active session file; `eN` (e.g. `e2`) erases a specific session file by number |
 | `E` | **Erase all** `/log_N.csv` files on SPIFFS — two-press confirm (press `E` twice within 5 s) |
 | `m` + number | Set max recording time in seconds (0 = no limit), e.g. `m300` = 5 min; logging auto-stops when limit reached |
 | `n` + number | Set RF channel 1-14, e.g. `n6`; master sends new channel in payload for 3 pings before switching so transponder can switch first (quicker link re-establishment); saved to NVS |
@@ -226,9 +226,9 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 
 **Maximum range (shoot-out mode):** For the longest radio range, set **Long Range 250 kbps** (**`l`** until you see 250k), **max TX power** on both master (**`p`** + 20 or highest) and transponder (**`t`** + 20 or highest via master target), and a ping interval (**`r`** + value; 10 ms minimum for STD and LR). **Theoretical open-ground range with panel antennas:** Using a simple free-space link budget (e.g. 20 dBm TX, LR 250k receiver sensitivity on the order of −100 dBm, 10–12 dBi gain per side, 15 dB margin for fading/terrain), **theoretical line-of-sight range is on the order of 20–30 km** with directional panels pointed at each other. Real-world open ground will be less due to multipath, ground reflection, and obstacles; actual range depends on antenna gain, feed loss, and local conditions.
 
-**CSV file logging:** `f` = start new session / stop, `d` / `dN` = dump active or specific session, `e` = erase active session, `E` = erase all (two-press confirm), `m` + seconds = max recording time (0 = no limit). Files are named `/log_N.csv` (N = session number 1-255, wrapping) on SPIFFS of **each** ESP32. Requires SPIFFS partition (default 4 MB usually has it).
+**CSV file logging:** `f` = start new session / stop, `L` = list all session files with sizes, `d` / `dN` = dump active or specific session, `e` / `eN` = erase last/active or specific session, `E` = erase all (two-press confirm), `m` + seconds = max recording time (0 = no limit). Files are named `/log_N.csv` (N = session number 1–255, wrapping) on SPIFFS of **each** ESP32. Requires SPIFFS partition (default 4 MB usually has it). Use `q` on the master to pause pings while managing files — this also silences the transponder and suppresses the auto-status and minute summary prints.
 
-**Session IDs:** Each press of `f` to start logging increments a session counter (saved to NVS so it survives reboots and never reuses old file IDs). The active session ID is broadcast in every ping. When the master stops logging the ID goes to 0 and the transponder closes its file. If the master starts a new test (new ID), the transponder closes the old file and opens the new one automatically.
+**Session IDs:** Each press of `f` to start logging on the master increments a session counter (saved to NVS so it survives reboots and never reuses old file IDs). The transponder also saves the last session ID it received to NVS, so `e` and `eN` work correctly even after a power cycle. The active session ID is broadcast in every ping. When the master stops logging the ID goes to 0 and the transponder closes its file. If the master starts a new test (new ID), the transponder closes the old file and opens the new one automatically.
 
 **Master to transponder sync:** When you press `f` on the **master**, each ping carries the `csvSessionId` in the ESP-NOW payload. The transponder mirrors it: opens `/log_N.csv` for the matching session, switches files if the ID changes mid-run, and stops when the ID becomes 0. No separate Serial command needed on the transponder for a paired session. **Flash the same firmware on both devices.** After stopping, connect Serial to the **transponder** and use `d` (or `dN`) to dump the transponder-side log (receive-path columns). If you press `f` on the transponder **locally** while the master's logging is off, it starts its own local session; the next ping from the master with a different or zero ID will override it.
 
@@ -344,7 +344,9 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 | 1-way RF request | OFF |
 | Zero cal (Z) | Not calibrated |
 | Plot mode | OFF |
+| Paused | OFF |
 | CSV file logging | OFF |
+| CSV session counter | 0 (increments to 1 on first `f`) |
 | CSV max record time | 0 (no limit) |
 | Promiscuous mode | OFF |
 | Serial baud | 115200 (or `SERIAL_BAUD`) |
@@ -360,6 +362,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 | 1-way RF mode | OFF |
 | Serial baud | 115200 (or `SERIAL_BAUD`; 9600 when 1-way RF is ON) |
 | CSV file logging | OFF |
+| CSV session counter | 0 (restored from NVS on boot; increments on first local `f` or first master sync) |
 | CSV max record time | 0 (no limit) |
 
 **Bridge** (GPIO 12 → GND at boot)
