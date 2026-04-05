@@ -143,8 +143,8 @@ enum TRXState { RELAY_RX = 0,
 TRXState trxState = RELAY_RX;
 unsigned long trxSettleStart = 0;
 unsigned long trxHoldStart = 0;
-uint32_t trxSettleMs = 15;     // relay TX settle time (ms); adjustable via Tnnn; saved to NVS
-uint32_t trxHoldMs = 5;        // hold relay in TX after onDataSent fires (ms); adjustable via Unnn; saved to NVS
+uint32_t trxSettleMs = 50;     // relay TX settle time (ms); adjustable via Tnnn; saved to NVS
+uint32_t trxHoldMs = 50;       // hold relay in TX after onDataSent fires (ms); adjustable via Unnn; saved to NVS
 bool trxRelayEnabled = false;  // runtime toggle; saved to NVS
 bool trxVerbose = false;       // print relay state transitions for debugging; Tv to toggle
 uint8_t trxPendingAddr[6];     // master src address for deferred pong send
@@ -944,8 +944,8 @@ void setup() {
     oneWayRFMode = prefs.getBool("oneWay", false);             // restore 1-way mode after power cycle
     csvSessionId = prefs.getUChar("csvSess", 0);               // restore last session so e works after power cycle
     trxRelayEnabled = prefs.getBool("trxRelay", false);        // restore T/R relay state
-    trxSettleMs = prefs.getUInt("trxSettle", 15);              // restore settle time (default 15 ms)
-    trxHoldMs = prefs.getUInt("trxHold", 5);                   // restore hold time (default 5 ms)
+    trxSettleMs = prefs.getUInt("trxSettle", 50);              // restore settle time (default 50 ms)
+    trxHoldMs = prefs.getUInt("trxHold", 50);                  // restore hold time (default 50 ms)
     prefs.end();
     if (oneWayRFMode) Serial.begin(SERIAL_BAUD_1WAY_RF);  // 9600 for Serial–MQTT bridge when 1-way persisted
     pinMode(TRX_RELAY_PIN, OUTPUT);
