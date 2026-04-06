@@ -434,6 +434,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 ## Planned features
 
+- **T/R relay control on the Master** — Add T/R coax relay switching to the master (currently transponder-only). The master would switch its relay to TX before sending each ping and back to RX after the `onDataSent` callback, using the same GPIO 4 / state-machine approach as the transponder. Useful for symmetric T/R setups where both ends use a coax relay for antenna switching.
 - **Audio indicator on the master for indicating replies** — An audible cue (e.g. beep or tone) on the master when a pong is received, to improve awareness during link testing and walk-test coordination.
 - **Commands via MQTT** — Allow sending some commands to the device over MQTT (e.g. set channel, toggle 1-way RF, start/stop logging) so the master or transponder can be controlled from the cloud or from an app.
 - **Transponder command acknowledgment** — The pong already carries the transponder’s current channel, rfMode, and txPower. Add on the master: (1) show transponder-reported channel and mode (e.g. in the status line or “TX ch X mode Y”) so the user can see what the transponder says it’s using; (2) when the master has sent a channel or RF-mode change, verify pong.channel / pong.rfMode against what was requested and print a confirmation or mismatch warning (e.g. “>> Transponder confirmed ch X” or “>> Transponder reports ch X (expected Y)”).
