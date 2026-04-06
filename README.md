@@ -171,9 +171,9 @@ Total relay ON time at defaults (50 + 50 ms): ~101 ms per pong cycle. Use `Tv` t
 | `esp_now.h` | ESP32 Arduino (esp_wifi) | ESP-NOW init, send, recv, peers |
 | `WiFi.h` | ESP32 Arduino | `WiFi.mode(WIFI_STA)` |
 | `esp_wifi.h` | ESP32 Arduino (esp_wifi) | Channel, protocol, TX power, promiscuous mode |
-| `Preferences.h` | ESP32 Arduino | NVS: save RF mode and channel across reboots |
+| `Preferences.h` | ESP32 Arduino | NVS: persist RF mode, channel, 1-way mode, CSV session counter, T/R relay settings, hunt-on-timeout across reboots |
 | `FS.h` | ESP32 Arduino | Filesystem abstraction |
-| `SPIFFS.h` | ESP32 Arduino | SPIFFS for CSV log file (`/log.csv`) |
+| `SPIFFS.h` | ESP32 Arduino | SPIFFS for CSV session log files (`/log_N.csv`) |
 | `time.h` / `sys/time.h` | Toolchain (C/POSIX) | RTC/time for timestamps |
 
 **Tested with:** Arduino core for **ESP32 by Espressif** **3.x** (ESP-IDF v5.5), on **ESP32 Dev Module** (ESP32-WROOM-32). Other 3.x versions with ESP-IDF v5.x should be compatible; if you use a different core or IDF version, API changes (e.g. promiscuous callback signature) may require small code updates. Check *Tools → Board → Boards Manager* for your installed core version.
@@ -190,7 +190,7 @@ Total relay ON time at defaults (50 + 50 ms): ~101 ms per pong cycle. Use `Tv` t
 |------|--------|
 | 1 | **Upload** the sketch to both ESP32s (same sketch for all) |
 | 2 | **Set roles:** GPIO 12 floating. GPIO 13 → GND = **Master**, GPIO 13 floating = **Transponder** |
-| 3 | **Power** both boards; open Serial Monitor on the **Master** (115200 baud or `SERIAL_BAUD`) |
+| 3 | **Power** both boards; open Serial Monitor on the **Master** (921600 baud (or `SERIAL_BAUD` in sketch)) |
 | 4 | You should see pong lines: `[HH:MM:SS] N:... | TX aa:bb:cc:... | FWD Loss:... | BWD Loss:... | Sym:... | Z:... | plSD:...` |
 
 **Bridge:** GPIO 12 → GND at boot. **1-way RF** (JSON on Serial, no pong): press **`W`** — see [1-way RF mode](#5-1-way-rf-mode).
@@ -204,13 +204,13 @@ Total relay ON time at defaults (50 + 50 ms): ~101 ms per pong cycle. Use `Tv` t
 | Role | GPIO 12 | GPIO 13 | Notes |
 |------|---------|---------|--------|
 | **Bridge** (Serial–MQTT) | GND | — | First run → AP **SerialMQTTBridge** at 192.168.4.1. WiFiManager + PubSubClient. |
-| **Master** | Floating | GND | Open Serial on Master (115200 or `SERIAL_BAUD`). |
+| **Master** | Floating | GND | Open Serial on Master (921600 default; or `SERIAL_BAUD` in sketch). |
 | **Transponder** | Floating | Floating / 3.3V | No Serial needed for link; use for 1-way JSON or commands. |
 
 ### 2. Basic link test
 
 1. Power both boards (USB or 3.3V).
-2. Open Serial Monitor on the **Master** (115200 baud).
+2. Open Serial Monitor on the **Master** (921600 baud).
 3. You should see periodic status and incoming pong lines like:
    - `[HH:MM:SS] N:... | TX aa:bb:cc:dd:ee:ff | FWD Loss:... | BWD Loss:... | Sym:... | Z:...`
    - **TX** is the MAC address of the replying transponder (so you can identify which unit replied). Press **`h`** for full status; the status table shows each device’s **MAC address** and **ESP-NOW mode** (master: TX broadcast, RX unicast; transponder: RX broadcast, TX unicast) for both boards.
@@ -226,7 +226,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | **Transponder** (pings) | `[HH:MM:SS] RX N=... \| Mstr aa:bb:cc:... \| mode \| RSSI:... \| Mstr Pwr:... \| Path Loss:... \| TX Pwr:...` | **Mstr** = master MAC; **TX Pwr** = transponder power (set by master). |
 | **Status** (`h`) | RF protocol, channel, MAC, ESP-NOW mode, CHIP TEMP (master), THERMAL (both), role settings | — |
 
-### 3. Master serial commands (115200 baud)
+### 3. Master serial commands (921600 baud)
 
 | Key | Action |
 |-----|--------|
@@ -336,7 +336,7 @@ LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 | **Single board** | Run one as Master (GPIO 13 → GND); use Serial to verify commands. Link tests need a second board as Transponder. |
 | **RSSI / path loss** | Vary distance and obstacles; watch FWD Loss, BWD Loss, Symmetry in Serial. |
 | **Plot mode** (`v`) | CSV line: channel, fwdLoss, bwdLoss, symmetry, zeroed, linkPct, lavg, plSD. Use for spreadsheets. |
-| **Fast ping rate** | At 115200, full lines ~8–10 ms; at 10 ms interval Serial can delay pings. Use plot mode, higher baud (e.g. 460800), or slower interval. **Baud** = `SERIAL_BAUD` in sketch. |
+| **Fast ping rate** | At 921600, full lines ~8–10 ms; at 10 ms interval Serial can delay pings. Use plot mode, higher baud (e.g. 460800), or slower interval. **Baud** = `SERIAL_BAUD` in sketch. |
 | **Power** | Master `p`, remote `t` set link budget; lower power helps test sensitivity. |
 
 ### 7. ESP32 optimisations
@@ -356,14 +356,14 @@ LED still flashes on each received ping. Master shows `[NO REPLY] | 1-way mode`.
 | **Mode at boot** | GPIO 12 = GND → **Bridge** (Serial1 RX @ 9600 → MQTT). GPIO 12 floating → Master or Transponder. |
 | **Role** | GPIO 13 = GND → **Master**; GPIO 13 floating → **Transponder**. |
 | **RF** | STD or Long Range 250k/500k; channel 1–14. Boot: channel 1, standard rate. **`n`** = channel, **`l`** = cycle mode. |
-| **Serial** | 115200 (or `SERIAL_BAUD`) on Master. **`h`** = full status (MAC, ESP-NOW mode). |
+| **Serial** | 921600 (default; or `SERIAL_BAUD` in sketch) on Master. **`h`** = full status (MAC, ESP-NOW mode). |
 | **Build** | Arduino IDE: open `dBmNow.ino`, Upload. **Flash all 3:** [Arduino CLI](https://arduino.github.io/arduino-cli/) + **`.\flash_all.ps1`** (edit COM ports in script). |
 
 ---
 
 ## Default settings on first run
 
-Values below apply when nothing has been configured by the user (no NVS/config yet). Master does not load channel or RF mode from NVS on boot; transponder loads only **hunt on timeout** from NVS (default OFF). Bridge uses the MQTT defaults until configured via the AP.
+Values below apply when nothing has been configured by the user (no NVS/config yet). Master does not load channel or RF mode from NVS on boot. Transponder loads the following from NVS on boot: hunt-on-timeout, 1-way RF mode, CSV session counter, T/R relay enabled/settle/hold. Bridge uses the MQTT defaults until configured via the AP.
 
 **Master** (GPIO 12 floating, GPIO 13 → GND)
 
@@ -382,7 +382,8 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 | CSV session counter | 0 (increments to 1 on first `f`) |
 | CSV max record time | 0 (no limit) |
 | Promiscuous mode | OFF |
-| Serial baud | 115200 (or `SERIAL_BAUD`) |
+| Remote T/R relay state | OFF (mirrors transponder `trxRelay` from pong; shown in `h` status as **REMOTE T/R**) |
+| Serial baud | 921600 (default; or `SERIAL_BAUD` in sketch) |
 
 **Transponder** (GPIO 12 floating, GPIO 13 floating)
 
@@ -393,7 +394,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 | TX power | -1 dBm (until first ping; then follows master target) |
 | Hunt on timeout | OFF |
 | 1-way RF mode | OFF |
-| Serial baud | 115200 (or `SERIAL_BAUD`; 9600 when 1-way RF is ON) |
+| Serial baud | 921600 (default; or `SERIAL_BAUD` in sketch; 9600 when 1-way RF is ON) |
 | CSV file logging | OFF |
 | CSV session counter | 0 (restored from NVS on boot; increments on first local `f` or first master sync) |
 | CSV max record time | 0 (no limit) |
@@ -420,6 +421,7 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 
 | Resource | Description |
 |----------|-------------|
+| **[SV1AFN RF High-Power Relay](https://sv1afn.com/shop/rf-switch/rf-high-power-relay/)** | SPDT coax relay module used for T/R switching on the transponder (GPIO 4). |
 | **[Arduino](https://www.arduino.cc/)** | Arduino IDE and documentation. |
 | **[MQTT Explorer](http://mqtt-explorer.com/)** | Desktop MQTT client for debugging and inspecting bridge topics. |
 | **[IoT MQTT Panel](https://play.google.com/store/apps/details?id=com.iot.mqtt.panel)** (Android) | MQTT client for 1-way path loss, RSSI, etc. with cloud Mosquitto + bridge. |
