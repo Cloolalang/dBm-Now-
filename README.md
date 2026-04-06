@@ -114,7 +114,23 @@ On **ping**, the master fills nonce, its TX power, target power for the transpon
 
 > **Minimum supply voltage:** The SV1AFN module's resistor network is designed for a **12–13.8 V** supply on PIN 3. The relay coil will not pull in reliably below about **9 V** — the on-board resistors drop too much voltage at lower supply levels. The green LED (control/MOSFET side) will still light at any voltage, so a lit LED alone does **not** confirm the relay has switched. Use at least **9 V** on PIN 3; **12 V** is recommended for reliable operation.
 
-Enable/disable with **`T`** on the transponder Serial (saved to NVS). When enabled: GPIO 4 goes HIGH just before every pong is sent, waits 15 ms for the relay to settle, sends the pong, and goes LOW again once the `onDataSent` callback fires. When **1-way RF mode** is ON the transponder never sends a pong, so GPIO 4 stays LOW permanently.
+Enable/disable with **`T`** on the transponder Serial (saved to NVS). When enabled: GPIO 4 goes HIGH just before every pong is sent, waits `trxSettleMs` for the relay to settle, sends the pong, then holds HIGH for `trxHoldMs` after the send completes before going LOW (RX). When **1-way RF mode** is ON the transponder never sends a pong, so GPIO 4 stays LOW permanently.
+
+**T/R relay Serial commands (transponder):**
+
+| Command | Action |
+|---------|--------|
+| `T` | Toggle T/R relay ON / OFF (saved to NVS) |
+| `Tnnn` | Set TX-settle time in ms, e.g. `T50` = 50 ms (saved to NVS; default 50 ms) |
+| `Tp` | **Test pulse** — fire one manual relay cycle (HIGH → settle → hold → LOW) without needing a ping; useful for verifying wiring |
+| `Tv` | Toggle **verbose debug** — prints GPIO state and millisecond timestamps at every relay transition |
+| `Unnn` | Set hold-after-send time in ms, e.g. `U50` = 50 ms (saved to NVS; default 50 ms) |
+
+**Timing summary:**
+```
+GPIO HIGH  →  [trxSettleMs]  →  esp_now_send()  →  [on-air ~1 ms]  →  onDataSent  →  [trxHoldMs]  →  GPIO LOW
+```
+Total relay ON time at defaults (50 + 50 ms): ~101 ms per pong cycle. Use `Tv` to see exact timestamps on Serial.
 
 **External antennas (u.fl cables):** If you use ESP32 dev boards with **u.fl cables and external antennas**, **do not connect the two devices directly** without at least **60 dB of attenuation** between them (e.g. attenuators or sufficient physical separation). Direct connection at full TX power can overload the receiver and damage hardware.
 
@@ -263,7 +279,7 @@ If you see `[NO REPLY]` with **1-way mode**, the transponder is replying via JSO
 | **`W`** / **`w`** | Toggle 1-way RF (transponder). Or **`W`** on master: request in next ping; transponder switches to 1-way (9600, JSON only, no pong). |
 | **`H`** | Toggle **hunt on timeout** (cycle channel/mode when no ping). OFF by default; NVS. |
 | **`0`** | Force RF to STD and restart (resync). |
-| **`T`** | Toggle **T/R coax relay** (GPIO 4, HIGH=TX). Saved to NVS. When ON: relay switches to TX before each pong send (15 ms settle), returns to RX after `onDataSent`. No effect in 1-way RF mode (GPIO 4 stays LOW). |
+| **`T`** | Toggle **T/R coax relay** ON/OFF (GPIO 4, HIGH=TX). Saved to NVS. `Tnnn` = set settle time ms (e.g. `T50`); `Tp` = manual test pulse; `Tv` = verbose debug. `Unnn` = set hold-after-send ms (e.g. `U50`). No effect in 1-way RF mode. |
 | **Serial RX** | Each ping: timestamp, nonce, master MAC, mode, RSSI, path loss, TX Pwr. In 1-way: JSON only (+ LED); no status. |
 | **Sync** | Follows master channel and RF mode from payload; syncs time; **CSV logging** mirrors master `csvSessionId` from ping (opens new session file when ID changes, stops when 0). Hunt (if ON) cycles channel/mode after timeouts. |
 
