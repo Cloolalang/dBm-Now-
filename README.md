@@ -398,6 +398,9 @@ Values below apply when nothing has been configured by the user (no NVS/config y
 | CSV session counter | 0 (restored from NVS on boot; increments on first local `f` or first master sync) |
 | CSV max record time | 0 (no limit) |
 | T/R relay | OFF (GPIO 4 LOW; `T` to enable; saved to NVS) |
+| T/R settle time | 50 ms (`Tnnn` to change; saved to NVS) |
+| T/R hold time | 50 ms (`Unnn` to change; saved to NVS) |
+| T/R verbose | OFF (`Tv` to toggle) |
 
 **Bridge** (GPIO 12 → GND at boot)
 
